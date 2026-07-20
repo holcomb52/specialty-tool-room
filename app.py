@@ -26,15 +26,22 @@ from lib.specialty_tools_storage import (
     ACCOUNTABILITY_OPTIONS,
     ACCOUNTABILITY_SIGNED_OUT,
     ACCOUNTABILITY_UNACCOUNTED,
+    INVENTORY_RESULT_LOCATED,
+    INVENTORY_RESULT_MISSING,
+    INVENTORY_RESULT_RETURNED,
     OVERDUE_AFTER_DAYS,
     add_tool,
     all_open_checkout_report_rows,
+    apply_inventory_mark,
     checkin_checkout,
     checkout_tool,
     checkouts_for_technician,
+    clear_inventory_mark,
     days_checked_out,
     dismiss_overdue_alert,
     find_tool,
+    inventory_count_rows,
+    inventory_count_stats,
     inventory_stats,
     list_overdue_checkouts,
     load_inventory,
@@ -48,7 +55,7 @@ from lib.specialty_tools_storage import (
     unique_locations,
     update_tool,
 )
-from lib.reports_pdf import build_checkout_report_pdf
+from lib.reports_pdf import build_checkout_report_pdf, build_inventory_report_pdf
 from lib.supabase_client import is_configured
 from lib.tech_list import _normalize, add_technician, load_technicians, remove_technician
 from styles import CUSTOM_CSS
@@ -1145,14 +1152,20 @@ elif page == "Import":
             st.error(summary)
 
 elif page == "Reports":
-    st.markdown("##### Checkout reports")
+    st.markdown("##### Reports")
     st.caption(
-        "See tools signed out by technician or shop-wide — then export a professional PDF."
+        "Checkout reports for the shop — plus a physical inventory count for Admin / Manager."
     )
+
+    report_options = ["By technician", "All currently out", "Recently returned"]
+    if is_admin():
+        report_options.append("Inventory count")
+    if st.session_state.get("report_mode") not in report_options:
+        st.session_state.report_mode = report_options[0]
 
     report_mode = st.radio(
         "Report",
-        ["By technician", "All currently out", "Recently returned"],
+        report_options,
         horizontal=True,
         key="report_mode",
     )
@@ -1240,54 +1253,416 @@ elif page == "Reports":
             type="primary",
         )
 
-    rows_raw: list = []
-    pdf_title = ""
-    pdf_subtitle = ""
-    pdf_name = "specialty-tool-report.pdf"
+    if report_mode == "Inventory count":
+        if not is_admin():
+            st.warning("Admin or Manager login required for inventory count.")
+            st.stop()
 
-    if report_mode == "By technician":
-        listed = _tech_names()
-        with_open = technicians_with_open_checkouts(data)
-        report_techs = list(listed)
-        for name in with_open:
-            if name.lower() not in {t.lower() for t in report_techs}:
-                report_techs.append(name)
+        _show_flash()
+        st.markdown("##### Physical inventory count")
+        st.caption(
+            "Walk the tool room location by location. Check **Located**, **Missing**, or "
+            "**Found wrong place — returned**. Missing tools go on the Unaccounted list. "
+            "Signed-out tools are listed so you do not hunt for something that is not here."
+        )
 
-        if not report_techs:
-            st.info("Add technicians under Technicians, or check a tool out first.")
-        else:
-            default_idx = 0
-            if with_open:
-                for i, name in enumerate(report_techs):
-                    if name.lower() == with_open[0].lower():
-                        default_idx = i
-                        break
-            tech = st.selectbox(
-                "Technician",
-                options=report_techs,
-                index=default_idx,
-                key="report_tech",
+        locs = ["(any location)"] + unique_locations(data)
+        if1, if2, if3 = st.columns([2.2, 1.4, 1.4])
+        with if1:
+            inv_query = st.text_input(
+                "Search tool # or description",
+                key="inv_query",
+                placeholder="e.g. 2113300230 or cable",
             )
-            rows_raw = checkouts_for_technician(data, tech)
-            pdf_title = f"Technician Checkout Report — {tech}"
-            pdf_subtitle = "Active tools signed out to this technician"
-            pdf_name = f"tech-checkout-{tech.lower().replace(' ', '-')}.pdf"
+        with if2:
+            inv_loc = st.selectbox("Location / area", options=locs, key="inv_loc")
+        with if3:
+            inv_focus = st.selectbox(
+                "Show",
+                options=["all", "needs_count", "missing", "located", "signed_out"],
+                format_func=lambda s: {
+                    "all": "All in filter",
+                    "needs_count": "Still need count",
+                    "missing": "Missing / unaccounted",
+                    "located": "Located / returned",
+                    "signed_out": "Signed out only",
+                }[s],
+                key="inv_focus",
+            )
+
+        location = "" if inv_loc == "(any location)" else inv_loc
+        inv_rows = inventory_count_rows(
+            data,
+            query=inv_query,
+            location=location,
+            status="active",
+            focus=inv_focus,
+        )
+        stats = inventory_count_stats(inv_rows)
+
+        s1, s2, s3, s4, s5 = st.columns(5)
+        with s1:
+            st.markdown(
+                stat_card("In filter", str(stats["total"]), "amber", "📋"),
+                unsafe_allow_html=True,
+            )
+        with s2:
+            st.markdown(
+                stat_card("Need count", str(stats["needs_count"]), "amber", "☐"),
+                unsafe_allow_html=True,
+            )
+        with s3:
+            st.markdown(
+                stat_card("Located", str(stats["located"]), "green", "✓"),
+                unsafe_allow_html=True,
+            )
+        with s4:
+            st.markdown(
+                stat_card(
+                    "Missing",
+                    str(stats["missing"]),
+                    "orange" if stats["missing"] else "green",
+                    "❓",
+                ),
+                unsafe_allow_html=True,
+            )
+        with s5:
+            st.markdown(
+                stat_card("Signed out", str(stats["signed_out"]), "orange", "📤"),
+                unsafe_allow_html=True,
+            )
+
+        if not location and not inv_query and inv_focus == "all":
+            st.info(
+                "Tip: pick a wall/shelf location (or search) so you can count one area at a time."
+            )
+
+        page_size = 25
+        total = len(inv_rows)
+        max_page = max(1, (total + page_size - 1) // page_size) if total else 1
+        if "inv_page" not in st.session_state:
+            st.session_state.inv_page = 1
+        # Reset page when filters change
+        filter_sig = f"{inv_query}|{inv_loc}|{inv_focus}"
+        if st.session_state.get("_inv_filter_sig") != filter_sig:
+            st.session_state._inv_filter_sig = filter_sig
+            st.session_state.inv_page = 1
+        page_n = int(st.session_state.get("inv_page") or 1)
+        page_n = max(1, min(page_n, max_page))
+        st.session_state.inv_page = page_n
+        start = (page_n - 1) * page_size
+        page_rows = inv_rows[start : start + page_size]
+
+        nav1, nav2, nav3 = st.columns([1, 2, 1])
+        with nav1:
+            if st.button("← Prev", disabled=page_n <= 1, key="inv_prev"):
+                st.session_state.inv_page = page_n - 1
+                st.rerun()
+        with nav2:
+            st.caption(
+                f"Showing {start + 1}–{min(start + page_size, total)} of {total}"
+                if total
+                else "No tools match these filters"
+            )
+        with nav3:
+            if st.button("Next →", disabled=page_n >= max_page or not total, key="inv_next"):
+                st.session_state.inv_page = page_n + 1
+                st.rerun()
+
+        counted_by = current_admin_name() if is_admin() else ""
+
+        for row in page_rows:
+            tid = str(row.get("tool_id") or "")
+            tool_no = row.get("tool_no") or ""
+            desc = row.get("description") or ""
+            loc = row.get("location") or "(no location)"
+            result = str(row.get("inventory_result") or "")
+
+            if row.get("is_signed_out"):
+                st.markdown(
+                    f"""
+                    <div class="inv-row inv-signed-out">
+                        <div class="inv-row-title"><strong>{tool_no}</strong> — {desc}</div>
+                        <div class="inv-row-meta">Assigned location: {loc}</div>
+                        <div class="inv-row-status">
+                            Signed out to <strong>{row.get("signed_out_to") or "—"}</strong>
+                            · {row.get("signed_out_at") or ""}
+                            — skip looking for this tool
+                        </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+                continue
+
+            st.markdown(
+                f"""
+                <div class="inv-row">
+                    <div class="inv-row-title"><strong>{tool_no}</strong> — {desc}</div>
+                    <div class="inv-row-meta">Look here: <strong>{loc}</strong></div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            c_loc, c_miss, c_ret, c_clear = st.columns([1.2, 1.2, 1.8, 0.8])
+            with c_loc:
+                located_on = st.checkbox(
+                    "Located",
+                    value=result == INVENTORY_RESULT_LOCATED,
+                    key=f"inv_located_{tid}",
+                )
+            with c_miss:
+                missing_on = st.checkbox(
+                    "Missing",
+                    value=result == INVENTORY_RESULT_MISSING,
+                    key=f"inv_missing_{tid}",
+                )
+            with c_ret:
+                returned_on = st.checkbox(
+                    "Found wrong place — returned to proper place",
+                    value=result == INVENTORY_RESULT_RETURNED,
+                    key=f"inv_returned_{tid}",
+                )
+            with c_clear:
+                clear_on = st.checkbox(
+                    "Clear",
+                    value=False,
+                    key=f"inv_clear_{tid}",
+                    help="Clear this tool's inventory mark",
+                )
+
+            desired = None
+            if clear_on:
+                desired = "clear"
+            elif located_on and result != INVENTORY_RESULT_LOCATED:
+                desired = INVENTORY_RESULT_LOCATED
+            elif missing_on and result != INVENTORY_RESULT_MISSING:
+                desired = INVENTORY_RESULT_MISSING
+            elif returned_on and result != INVENTORY_RESULT_RETURNED:
+                desired = INVENTORY_RESULT_RETURNED
+            elif (
+                not located_on
+                and not missing_on
+                and not returned_on
+                and result
+            ):
+                # User unchecked the active box
+                desired = "clear"
+
+            # Prefer the newly checked box when multiple flip in one run
+            newly = []
+            if located_on and result != INVENTORY_RESULT_LOCATED:
+                newly.append(INVENTORY_RESULT_LOCATED)
+            if missing_on and result != INVENTORY_RESULT_MISSING:
+                newly.append(INVENTORY_RESULT_MISSING)
+            if returned_on and result != INVENTORY_RESULT_RETURNED:
+                newly.append(INVENTORY_RESULT_RETURNED)
+            if clear_on:
+                newly = ["clear"]
+            if len(newly) == 1:
+                desired = newly[0]
+            elif len(newly) > 1:
+                # Last intentional: missing takes priority if conflicting
+                if INVENTORY_RESULT_MISSING in newly:
+                    desired = INVENTORY_RESULT_MISSING
+                elif INVENTORY_RESULT_RETURNED in newly:
+                    desired = INVENTORY_RESULT_RETURNED
+                else:
+                    desired = newly[0]
+
+            if desired == "clear" and result:
+                ok, msg = clear_inventory_mark(data, tid)
+                if ok:
+                    _persist(data)
+                    for k in (
+                        f"inv_located_{tid}",
+                        f"inv_missing_{tid}",
+                        f"inv_returned_{tid}",
+                        f"inv_clear_{tid}",
+                    ):
+                        st.session_state.pop(k, None)
+                    _set_flash(msg)
+                    st.rerun()
+                else:
+                    st.error(msg)
+            elif desired in (
+                INVENTORY_RESULT_LOCATED,
+                INVENTORY_RESULT_MISSING,
+                INVENTORY_RESULT_RETURNED,
+            ):
+                ok, msg = apply_inventory_mark(
+                    data, tid, desired, counted_by=counted_by
+                )
+                if ok:
+                    _persist(data)
+                    for k in (
+                        f"inv_located_{tid}",
+                        f"inv_missing_{tid}",
+                        f"inv_returned_{tid}",
+                        f"inv_clear_{tid}",
+                    ):
+                        st.session_state.pop(k, None)
+                    if desired == INVENTORY_RESULT_MISSING:
+                        _set_flash(
+                            f"{msg} It now appears in Catalog → Unaccounted."
+                        )
+                    else:
+                        _set_flash(msg)
+                    st.rerun()
+                else:
+                    st.error(msg)
+
+        pdf_rows = inv_rows
+        pdf_bytes = build_inventory_report_pdf(
+            title="Physical Inventory Count",
+            subtitle=(
+                f"Location: {location or 'All'} · Focus: {inv_focus.replace('_', ' ')}"
+            ),
+            rows=pdf_rows,
+            summary=[
+                ("In filter", str(stats["total"])),
+                ("Need count", str(stats["needs_count"])),
+                ("Located / returned", str(stats["located"])),
+                ("Missing", str(stats["missing"])),
+                ("Signed out", str(stats["signed_out"])),
+            ],
+        )
+        st.download_button(
+            "Export inventory PDF",
+            data=pdf_bytes,
+            file_name="inventory-count.pdf",
+            mime="application/pdf",
+            use_container_width=True,
+            key="pdf_inventory",
+            type="primary",
+        )
+
+    else:
+        rows_raw: list = []
+        pdf_title = ""
+        pdf_subtitle = ""
+        pdf_name = "specialty-tool-report.pdf"
+
+        if report_mode == "By technician":
+            listed = _tech_names()
+            with_open = technicians_with_open_checkouts(data)
+            report_techs = list(listed)
+            for name in with_open:
+                if name.lower() not in {t.lower() for t in report_techs}:
+                    report_techs.append(name)
+
+            if not report_techs:
+                st.info("Add technicians under Technicians, or check a tool out first.")
+            else:
+                default_idx = 0
+                if with_open:
+                    for i, name in enumerate(report_techs):
+                        if name.lower() == with_open[0].lower():
+                            default_idx = i
+                            break
+                tech = st.selectbox(
+                    "Technician",
+                    options=report_techs,
+                    index=default_idx,
+                    key="report_tech",
+                )
+                rows_raw = checkouts_for_technician(data, tech)
+                pdf_title = f"Technician Checkout Report — {tech}"
+                pdf_subtitle = "Active tools signed out to this technician"
+                pdf_name = f"tech-checkout-{tech.lower().replace(' ', '-')}.pdf"
+
+                if not rows_raw:
+                    st.markdown(
+                        status_banner(f"{tech} has nothing checked out right now.", "success"),
+                        unsafe_allow_html=True,
+                    )
+                    st.caption(
+                        "Check a tool out to this technician first — the report will list who has it, "
+                        "when it was signed out, and how long it has been out."
+                    )
+                    _pdf_download(
+                        title=pdf_title,
+                        subtitle=pdf_subtitle,
+                        rows_raw=rows_raw,
+                        filename=pdf_name,
+                        key="pdf_tech_empty",
+                    )
+                else:
+                    _show_stats(rows_raw)
+                    st.dataframe(
+                        pd.DataFrame(_report_table(rows_raw)),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+                    _pdf_download(
+                        title=pdf_title,
+                        subtitle=pdf_subtitle,
+                        rows_raw=rows_raw,
+                        filename=pdf_name,
+                        key="pdf_tech",
+                    )
+        elif report_mode == "All currently out":
+            rows_raw = all_open_checkout_report_rows(data)
+            pdf_title = "All Tools Currently Signed Out"
+            pdf_subtitle = "Shop-wide specialty tool accountability"
+            pdf_name = "all-tools-signed-out.pdf"
 
             if not rows_raw:
                 st.markdown(
-                    status_banner(f"{tech} has nothing checked out right now.", "success"),
+                    status_banner("Special tool room is clear — nothing signed out.", "success"),
                     unsafe_allow_html=True,
                 )
                 st.caption(
-                    "Check a tool out to this technician first — the report will list who has it, "
-                    "when it was signed out, and how long it has been out."
+                    "Use Check Out / In to sign tools out. Then this report (and the PDF) will show "
+                    "each technician, signed-out time, and how long each tool has been out."
                 )
                 _pdf_download(
                     title=pdf_title,
                     subtitle=pdf_subtitle,
                     rows_raw=rows_raw,
                     filename=pdf_name,
-                    key="pdf_tech_empty",
+                    key="pdf_all_empty",
+                )
+            else:
+                _show_stats(rows_raw)
+                # Sort display by technician first name, then duration
+                display = sorted(
+                    rows_raw,
+                    key=lambda r: (
+                        str(r.get("tech_name") or "").split()[0].lower()
+                        if str(r.get("tech_name") or "").split()
+                        else "",
+                        -int(r.get("days_out") or 0),
+                    ),
+                )
+                st.dataframe(
+                    pd.DataFrame(_report_table(display)),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+                _pdf_download(
+                    title=pdf_title,
+                    subtitle=pdf_subtitle,
+                    rows_raw=display,
+                    filename=pdf_name,
+                    key="pdf_all",
+                )
+
+        elif report_mode == "Recently returned":
+            rows_raw = returned_tool_report_rows(data)
+            pdf_title = "Recently Returned Specialty Tools"
+            pdf_subtitle = "Completed check-outs with time held by technician"
+            pdf_name = "recently-returned-tools.pdf"
+
+            if not rows_raw:
+                st.info("No returned tools in history yet.")
+                _pdf_download(
+                    title=pdf_title,
+                    subtitle=pdf_subtitle,
+                    rows_raw=rows_raw,
+                    filename=pdf_name,
+                    key="pdf_returned_empty",
                 )
             else:
                 _show_stats(rows_raw)
@@ -1301,84 +1676,8 @@ elif page == "Reports":
                     subtitle=pdf_subtitle,
                     rows_raw=rows_raw,
                     filename=pdf_name,
-                    key="pdf_tech",
+                    key="pdf_returned",
                 )
-    elif report_mode == "All currently out":
-        rows_raw = all_open_checkout_report_rows(data)
-        pdf_title = "All Tools Currently Signed Out"
-        pdf_subtitle = "Shop-wide specialty tool accountability"
-        pdf_name = "all-tools-signed-out.pdf"
-
-        if not rows_raw:
-            st.markdown(
-                status_banner("Special tool room is clear — nothing signed out.", "success"),
-                unsafe_allow_html=True,
-            )
-            st.caption(
-                "Use Check Out / In to sign tools out. Then this report (and the PDF) will show "
-                "each technician, signed-out time, and how long each tool has been out."
-            )
-            _pdf_download(
-                title=pdf_title,
-                subtitle=pdf_subtitle,
-                rows_raw=rows_raw,
-                filename=pdf_name,
-                key="pdf_all_empty",
-            )
-        else:
-            _show_stats(rows_raw)
-            # Sort display by technician first name, then duration
-            display = sorted(
-                rows_raw,
-                key=lambda r: (
-                    str(r.get("tech_name") or "").split()[0].lower()
-                    if str(r.get("tech_name") or "").split()
-                    else "",
-                    -int(r.get("days_out") or 0),
-                ),
-            )
-            st.dataframe(
-                pd.DataFrame(_report_table(display)),
-                use_container_width=True,
-                hide_index=True,
-            )
-            _pdf_download(
-                title=pdf_title,
-                subtitle=pdf_subtitle,
-                rows_raw=display,
-                filename=pdf_name,
-                key="pdf_all",
-            )
-
-    elif report_mode == "Recently returned":
-        rows_raw = returned_tool_report_rows(data)
-        pdf_title = "Recently Returned Specialty Tools"
-        pdf_subtitle = "Completed check-outs with time held by technician"
-        pdf_name = "recently-returned-tools.pdf"
-
-        if not rows_raw:
-            st.info("No returned tools in history yet.")
-            _pdf_download(
-                title=pdf_title,
-                subtitle=pdf_subtitle,
-                rows_raw=rows_raw,
-                filename=pdf_name,
-                key="pdf_returned_empty",
-            )
-        else:
-            _show_stats(rows_raw)
-            st.dataframe(
-                pd.DataFrame(_report_table(rows_raw)),
-                use_container_width=True,
-                hide_index=True,
-            )
-            _pdf_download(
-                title=pdf_title,
-                subtitle=pdf_subtitle,
-                rows_raw=rows_raw,
-                filename=pdf_name,
-                key="pdf_returned",
-            )
 
 elif page == "History":
     history = list(data.get("history") or [])[:80]

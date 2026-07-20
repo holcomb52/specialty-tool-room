@@ -123,6 +123,63 @@ def test_report_rows_and_pdf():
     assert pdf.startswith(b"%PDF")
 
 
+def test_inventory_missing_goes_unaccounted_and_signed_out_blocks_mark():
+    from lib.reports_pdf import build_inventory_report_pdf
+    from lib.specialty_tools_storage import (
+        ACCOUNTABILITY_LOCATED,
+        ACCOUNTABILITY_UNACCOUNTED,
+        apply_inventory_mark,
+        clear_inventory_mark,
+        inventory_count_rows,
+        inventory_stats,
+        search_tools,
+    )
+
+    data = _load_seed()
+    tool = next(t for t in data["tools"] if t.get("tool_no") == "C-4150A")
+    tid = tool["id"]
+
+    ok, msg = apply_inventory_mark(data, tid, "missing", counted_by="Manager")
+    assert ok, msg
+    assert tool["accountability"] == ACCOUNTABILITY_UNACCOUNTED
+    assert tool["inventory_result"] == "missing"
+    assert inventory_stats(data)["unaccounted"] >= 1
+    missing_hits = search_tools(data, only_unaccounted=True)
+    assert any(t["id"] == tid for t in missing_hits)
+
+    ok, msg = apply_inventory_mark(data, tid, "returned", counted_by="Manager")
+    assert ok, msg
+    assert tool["accountability"] == ACCOUNTABILITY_LOCATED
+    assert tool["inventory_result"] == "returned"
+    assert not any(t["id"] == tid for t in search_tools(data, only_unaccounted=True))
+
+    ok, msg = checkout_tool(data, tid, "Dale Potts", qty=1)
+    assert ok, msg
+    ok, msg = apply_inventory_mark(data, tid, "located")
+    assert not ok
+    assert "signed out" in msg.lower()
+
+    rows = inventory_count_rows(data, query="C-4150A", focus="signed_out")
+    assert len(rows) == 1
+    assert rows[0]["is_signed_out"] is True
+    assert "Dale Potts" in rows[0]["signed_out_to"]
+
+    ok, msg = checkin_checkout(data, data["active_checkouts"][0]["id"])
+    assert ok, msg
+    ok, msg = apply_inventory_mark(data, tid, "located")
+    assert ok, msg
+    ok, msg = clear_inventory_mark(data, tid)
+    assert ok, msg
+    assert not tool.get("inventory_result")
+
+    pdf = build_inventory_report_pdf(
+        title="Inventory Test",
+        rows=inventory_count_rows(data, query="C-4150A"),
+        summary=[("In filter", "1")],
+    )
+    assert pdf.startswith(b"%PDF")
+
+
 def test_add_and_search_tool():
     data = _load_seed()
     ok, msg, tool = add_tool(
@@ -137,6 +194,7 @@ def test_add_and_search_tool():
     hits = search_tools(data, "ZZ-TEST-99")
     assert len(hits) == 1
     assert hits[0]["location"] == "SHELF A"
+
 
 
 def test_import_dedupes_and_keeps_system_location():

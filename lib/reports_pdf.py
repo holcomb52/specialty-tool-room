@@ -311,3 +311,149 @@ def build_checkout_report_pdf(
 
     doc.build(story, onFirstPage=_footer, onLaterPages=_footer)
     return buffer.getvalue()
+
+
+def build_inventory_report_pdf(
+    *,
+    title: str,
+    subtitle: str = "",
+    rows: List[Dict[str, Any]],
+    summary: Optional[Sequence[tuple[str, str]]] = None,
+    generated_at: Optional[datetime] = None,
+) -> bytes:
+    """PDF for physical inventory count status."""
+    styles = _styles()
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=letter,
+        leftMargin=0.5 * inch,
+        rightMargin=0.5 * inch,
+        topMargin=0.55 * inch,
+        bottomMargin=0.65 * inch,
+        title=title,
+        author="Specialty Tool Room",
+    )
+
+    when = (generated_at or datetime.now()).astimezone()
+    stamp = when.strftime("%m/%d/%Y %I:%M %p")
+
+    story: List[Any] = [
+        Paragraph("NEW SMYRNA BEACH CHRYSLER", styles["brand"]),
+        Paragraph("Specialty Tool Room", styles["title"]),
+        Paragraph(title, styles["subtitle"]),
+    ]
+    if subtitle:
+        story.append(Paragraph(subtitle, styles["subtitle"]))
+    story.append(Paragraph(f"Generated {stamp}", styles["meta"]))
+    story.append(Spacer(1, 0.12 * inch))
+
+    if summary:
+        story.append(_summary_table(summary, styles))
+        story.append(Spacer(1, 0.18 * inch))
+
+    story.append(
+        Paragraph(
+            "Inventory status — located, missing/unaccounted, signed out, or returned to place",
+            styles["section"],
+        )
+    )
+
+    header = [
+        _p("Tool #", styles["cell_bold"]),
+        _p("Description", styles["cell_bold"]),
+        _p("Location", styles["cell_bold"]),
+        _p("Status", styles["cell_bold"]),
+        _p("Detail", styles["cell_bold"]),
+    ]
+    data = [header]
+    if not rows:
+        data.append(
+            [
+                _p("No tools in this filter", styles["empty"]),
+                _p("—", styles["cell"]),
+                _p("—", styles["cell"]),
+                _p("—", styles["cell"]),
+                _p("—", styles["cell"]),
+            ]
+        )
+    else:
+        for row in rows:
+            if row.get("is_signed_out"):
+                status = "Signed out"
+                detail = f"To {row.get('signed_out_to') or '—'} · {row.get('signed_out_at') or ''}"
+            else:
+                result = str(row.get("inventory_result") or "")
+                if result == "missing":
+                    status = "Missing / Unaccounted"
+                    detail = "Not found during inventory"
+                elif result == "returned":
+                    status = "Returned to place"
+                    detail = "Found wrong place — put back"
+                elif result == "located":
+                    status = "Located"
+                    detail = "Found at assigned location"
+                else:
+                    status = "Needs count"
+                    detail = "Not checked yet"
+            data.append(
+                [
+                    _p(row.get("tool_no"), styles["cell_bold"]),
+                    _p(row.get("description"), styles["cell"]),
+                    _p(row.get("location") or "—", styles["cell"]),
+                    _p(status, styles["cell_focus"]),
+                    _p(detail, styles["cell"]),
+                ]
+            )
+
+    col_widths = [
+        0.9 * inch,
+        2.1 * inch,
+        1.4 * inch,
+        1.35 * inch,
+        1.95 * inch,
+    ]
+    table = Table(data, colWidths=col_widths, repeatRows=1)
+    style_cmds = [
+        ("BACKGROUND", (0, 0), (-1, 0), _HEADER_BG),
+        ("TEXTCOLOR", (0, 0), (-1, 0), _HEADER_FG),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, 0), 8),
+        ("ALIGN", (0, 0), (-1, 0), "CENTER"),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("GRID", (0, 0), (-1, -1), 0.35, _LINE),
+        ("LEFTPADDING", (0, 0), (-1, -1), 4),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+        ("TOPPADDING", (0, 0), (-1, -1), 6),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+        ("BOX", (0, 0), (-1, -1), 0.8, _INK),
+        ("BACKGROUND", (3, 1), (3, -1), _FOCUS),
+    ]
+    for i in range(1, len(data)):
+        if rows and i % 2 == 0:
+            style_cmds.append(("BACKGROUND", (0, i), (2, i), _ROW_ALT))
+            style_cmds.append(("BACKGROUND", (4, i), (4, i), _ROW_ALT))
+    table.setStyle(TableStyle(style_cmds))
+    story.append(table)
+
+    def _footer(canvas, _doc) -> None:
+        canvas.saveState()
+        canvas.setStrokeColor(_LINE)
+        canvas.setLineWidth(0.5)
+        canvas.line(0.5 * inch, 0.45 * inch, letter[0] - 0.5 * inch, 0.45 * inch)
+        canvas.setFont("Helvetica", 8)
+        canvas.setFillColor(_MUTED)
+        canvas.drawString(
+            0.5 * inch,
+            0.28 * inch,
+            "Specialty Tool Room · Confidential shop use",
+        )
+        canvas.drawRightString(
+            letter[0] - 0.5 * inch,
+            0.28 * inch,
+            f"Page {_doc.page}",
+        )
+        canvas.restoreState()
+
+    doc.build(story, onFirstPage=_footer, onLaterPages=_footer)
+    return buffer.getvalue()

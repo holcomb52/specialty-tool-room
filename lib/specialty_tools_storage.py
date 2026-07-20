@@ -836,3 +836,232 @@ def unique_locations(data: Dict[str, Any]) -> List[str]:
         },
         key=str.lower,
     )
+
+
+INVENTORY_RESULT_LOCATED = "located"
+INVENTORY_RESULT_MISSING = "missing"
+INVENTORY_RESULT_RETURNED = "returned"
+INVENTORY_RESULTS = (
+    INVENTORY_RESULT_LOCATED,
+    INVENTORY_RESULT_MISSING,
+    INVENTORY_RESULT_RETURNED,
+)
+INVENTORY_RESULT_LABELS = {
+    INVENTORY_RESULT_LOCATED: "Located",
+    INVENTORY_RESULT_MISSING: "Missing",
+    INVENTORY_RESULT_RETURNED: "Found wrong place — returned",
+}
+
+
+def _open_checkouts_for_tool(
+    data: Dict[str, Any], tool_id: str
+) -> List[Dict[str, Any]]:
+    tid = str(tool_id or "")
+    return [
+        c
+        for c in data.get("active_checkouts") or []
+        if str(c.get("tool_id") or "") == tid
+    ]
+
+
+def inventory_result_for_tool(tool: Dict[str, Any]) -> str:
+    raw = str(tool.get("inventory_result") or "").strip().lower()
+    if raw in INVENTORY_RESULTS:
+        return raw
+    acct = normalize_accountability(tool.get("accountability"))
+    if acct == ACCOUNTABILITY_UNACCOUNTED:
+        return INVENTORY_RESULT_MISSING
+    return ""
+
+
+def apply_inventory_mark(
+    data: Dict[str, Any],
+    tool_id: str,
+    result: str,
+    *,
+    counted_by: str = "",
+) -> Tuple[bool, str]:
+    """
+    Record a physical inventory count for one tool.
+
+    - located: found at assigned location
+    - missing: not found → Unaccounted (shows in Unaccounted box)
+    - returned: found in wrong place, put back → Located
+    """
+    tool = find_tool(data, tool_id)
+    if not tool:
+        return False, "Tool not found."
+    clean = str(result or "").strip().lower()
+    if clean not in INVENTORY_RESULTS:
+        return False, "Choose Located, Missing, or Returned to proper place."
+
+    if qty_out(data, tool_id) > 0:
+        return (
+            False,
+            "This tool is signed out — skip the physical search (shown as Signed out).",
+        )
+
+    if clean == INVENTORY_RESULT_MISSING:
+        tool["accountability"] = ACCOUNTABILITY_UNACCOUNTED
+        note = "Inventory: marked missing — moved to Unaccounted"
+    elif clean == INVENTORY_RESULT_RETURNED:
+        tool["accountability"] = ACCOUNTABILITY_LOCATED
+        note = "Inventory: found in wrong place, returned to proper location"
+    else:
+        tool["accountability"] = ACCOUNTABILITY_LOCATED
+        note = "Inventory: located at assigned location"
+
+    who = str(counted_by or "").strip()
+    if who:
+        note = f"{note} (by {who})"
+
+    tool["inventory_result"] = clean
+    tool["inventory_checked_at"] = _now_iso()
+    if who:
+        tool["inventory_counted_by"] = who
+
+    _append_history(
+        data,
+        {
+            "id": str(uuid.uuid4()),
+            "action": "inventory",
+            "tool_id": tool_id,
+            "tool_no": tool.get("tool_no", ""),
+            "description": tool.get("description", ""),
+            "tech_name": who,
+            "qty": tool.get("quantity", 1),
+            "note": note,
+            "ro_number": "",
+            "at": tool["inventory_checked_at"],
+        },
+    )
+    label = INVENTORY_RESULT_LABELS.get(clean, clean)
+    return True, f"{tool.get('tool_no')}: {label}."
+
+
+def clear_inventory_mark(data: Dict[str, Any], tool_id: str) -> Tuple[bool, str]:
+    """Clear inventory checkboxes / result for a tool (does not wipe location)."""
+    tool = find_tool(data, tool_id)
+    if not tool:
+        return False, "Tool not found."
+    tool.pop("inventory_result", None)
+    tool.pop("inventory_checked_at", None)
+    tool.pop("inventory_counted_by", None)
+    # If it was missing via inventory, clear unaccounted so it leaves that list
+    if normalize_accountability(tool.get("accountability")) == ACCOUNTABILITY_UNACCOUNTED:
+        tool["accountability"] = ""
+    return True, f"Cleared inventory mark on {tool.get('tool_no')}."
+
+
+def inventory_count_rows(
+    data: Dict[str, Any],
+    *,
+    query: str = "",
+    location: str = "",
+    status: str = "active",
+    focus: str = "all",
+) -> List[Dict[str, Any]]:
+    """
+    Rows for the physical inventory report.
+
+    focus: all | needs_count | missing | located | signed_out
+    """
+    q = str(query or "").strip().lower()
+    loc_filter = str(location or "").strip().lower()
+    focus_key = str(focus or "all").strip().lower()
+    rows: List[Dict[str, Any]] = []
+
+    for tool in data.get("tools") or []:
+        if status != "all" and tool.get("status") != status:
+            continue
+        tool_loc = str(tool.get("location") or "").strip()
+        if loc_filter and loc_filter not in tool_loc.lower():
+            continue
+        if q:
+            hay = " ".join(
+                [
+                    str(tool.get("tool_no") or ""),
+                    str(tool.get("description") or ""),
+                    tool_loc,
+                    str(tool.get("notes") or ""),
+                ]
+            ).lower()
+            if q not in hay:
+                continue
+
+        tid = str(tool.get("id") or "")
+        open_cos = _open_checkouts_for_tool(data, tid)
+        is_signed_out = bool(open_cos)
+        result = inventory_result_for_tool(tool)
+        acct = normalize_accountability(tool.get("accountability"))
+
+        if focus_key == "signed_out" and not is_signed_out:
+            continue
+        if focus_key == "missing" and result != INVENTORY_RESULT_MISSING and acct != ACCOUNTABILITY_UNACCOUNTED:
+            continue
+        if focus_key == "located" and result not in (
+            INVENTORY_RESULT_LOCATED,
+            INVENTORY_RESULT_RETURNED,
+        ):
+            continue
+        if focus_key == "needs_count" and (is_signed_out or result):
+            continue
+
+        tech_names = sorted(
+            {
+                str(c.get("tech_name") or "").strip()
+                for c in open_cos
+                if str(c.get("tech_name") or "").strip()
+            },
+            key=str.lower,
+        )
+        first_out = ""
+        if open_cos:
+            starts = [str(c.get("checked_out_at") or "") for c in open_cos]
+            first_out = min(starts) if starts else ""
+
+        rows.append(
+            {
+                "tool_id": tid,
+                "tool_no": tool.get("tool_no", ""),
+                "description": tool.get("description", ""),
+                "location": tool_loc,
+                "qty": int(tool.get("quantity") or 1),
+                "qty_out": qty_out(data, tid),
+                "is_signed_out": is_signed_out,
+                "signed_out_to": ", ".join(tech_names),
+                "signed_out_at": format_report_when(first_out) if first_out else "",
+                "accountability": acct,
+                "inventory_result": result,
+                "inventory_checked_at": str(tool.get("inventory_checked_at") or ""),
+                "inventory_counted_by": str(tool.get("inventory_counted_by") or ""),
+            }
+        )
+
+    rows.sort(key=lambda r: str(r.get("tool_no") or "").lower())
+    return rows
+
+
+def inventory_count_stats(rows: List[Dict[str, Any]]) -> Dict[str, int]:
+    return {
+        "total": len(rows),
+        "signed_out": sum(1 for r in rows if r.get("is_signed_out")),
+        "missing": sum(
+            1
+            for r in rows
+            if not r.get("is_signed_out")
+            and r.get("inventory_result") == INVENTORY_RESULT_MISSING
+        ),
+        "located": sum(
+            1
+            for r in rows
+            if not r.get("is_signed_out")
+            and r.get("inventory_result")
+            in (INVENTORY_RESULT_LOCATED, INVENTORY_RESULT_RETURNED)
+        ),
+        "needs_count": sum(
+            1
+            for r in rows
+            if not r.get("is_signed_out") and not r.get("inventory_result")
+        ),
+    }

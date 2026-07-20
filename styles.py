@@ -154,6 +154,33 @@ div.st-key-stat_unaccounted button { border-color: rgba(239,68,68,0.45) !importa
 .banner-error { background: rgba(239,68,68,0.12); border: 1px solid rgba(239,68,68,0.3); color: #fecaca; }
 .banner-info { background: rgba(59,130,246,0.12); border: 1px solid rgba(59,130,246,0.3); color: #bfdbfe; }
 
+/* Physical inventory count rows */
+.inv-row {
+    border: 1px solid rgba(245, 158, 11, 0.22);
+    border-radius: 10px;
+    padding: 0.65rem 0.85rem;
+    margin: 0.85rem 0 0.35rem;
+    background: rgba(28, 25, 23, 0.65);
+}
+.inv-row-title {
+    color: #f5f5f4;
+    font-size: 0.98rem;
+    margin-bottom: 0.2rem;
+}
+.inv-row-meta {
+    color: #a8a29e;
+    font-size: 0.88rem;
+}
+.inv-signed-out {
+    border-color: rgba(234, 88, 12, 0.45);
+    background: rgba(124, 45, 18, 0.28);
+}
+.inv-row-status {
+    color: #fdba74;
+    font-size: 0.92rem;
+    margin-top: 0.35rem;
+}
+
 /* Multi-tool checkout acknowledgment */
 .ack-danger {
     background: linear-gradient(180deg, #7f1d1d 0%, #450a0a 100%);
