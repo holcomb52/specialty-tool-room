@@ -105,6 +105,45 @@ section[data-testid="stSidebar"] {
 .accent-stone { border-color: rgba(168,162,158,0.28); }
 .accent-stone .stat-value { color: #d6d3d1; }
 
+/* Clickable dashboard stat buttons */
+div[class*="st-key-stat_"] button {
+    background: rgba(28,25,23,0.85) !important;
+    border-radius: 14px !important;
+    border: 1px solid rgba(255,255,255,0.08) !important;
+    padding: 0.85rem 1rem 0.95rem !important;
+    text-align: left !important;
+    height: auto !important;
+    min-height: 5.4rem !important;
+    white-space: pre-line !important;
+    line-height: 1.35 !important;
+    font-size: 0.72rem !important;
+    font-weight: 600 !important;
+    letter-spacing: 0.04em !important;
+    text-transform: uppercase !important;
+    color: #a8a29e !important;
+    transition: border-color 0.15s ease, transform 0.15s ease, box-shadow 0.15s ease !important;
+    cursor: pointer !important;
+}
+div[class*="st-key-stat_"] button:hover {
+    border-color: rgba(245,158,11,0.55) !important;
+    box-shadow: 0 0 0 1px rgba(245,158,11,0.25) !important;
+    transform: translateY(-1px);
+}
+div[class*="st-key-stat_"] button p {
+    text-align: left !important;
+    white-space: pre-line !important;
+    font-family: 'Barlow Condensed', sans-serif !important;
+    font-size: 1.05rem !important;
+    font-weight: 700 !important;
+    line-height: 1.35 !important;
+}
+div.st-key-stat_tools_on_file button { border-color: rgba(245,158,11,0.28) !important; color: #fbbf24 !important; }
+div.st-key-stat_checked_out button { border-color: rgba(234,88,12,0.28) !important; color: #fb923c !important; }
+div.st-key-stat_overdue button { border-color: rgba(234,88,12,0.28) !important; color: #fb923c !important; }
+div.st-key-stat_with_location button { border-color: rgba(34,197,94,0.28) !important; color: #4ade80 !important; }
+div.st-key-stat_without_location button { border-color: rgba(148,163,184,0.35) !important; color: #cbd5e1 !important; }
+div.st-key-stat_unaccounted button { border-color: rgba(239,68,68,0.45) !important; color: #f87171 !important; }
+
 .status-banner {
     display: flex; align-items: center; gap: 0.65rem;
     padding: 0.75rem 1rem; border-radius: 10px; margin: 0.5rem 0 1rem;
@@ -114,6 +153,60 @@ section[data-testid="stSidebar"] {
 .banner-warn { background: rgba(245,158,11,0.12); border: 1px solid rgba(245,158,11,0.3); color: #fde68a; }
 .banner-error { background: rgba(239,68,68,0.12); border: 1px solid rgba(239,68,68,0.3); color: #fecaca; }
 .banner-info { background: rgba(59,130,246,0.12); border: 1px solid rgba(59,130,246,0.3); color: #bfdbfe; }
+
+/* Multi-tool checkout acknowledgment */
+.ack-danger {
+    background: linear-gradient(180deg, #7f1d1d 0%, #450a0a 100%);
+    border: 3px solid #ef4444;
+    border-radius: 12px;
+    padding: 1rem 1.1rem 1.15rem;
+    margin: 0.25rem 0 1rem;
+    box-shadow: 0 0 0 4px rgba(239, 68, 68, 0.25), 0 12px 40px rgba(127, 29, 29, 0.45);
+}
+.ack-danger-title {
+    font-family: 'Barlow Condensed', sans-serif;
+    font-size: 1.55rem;
+    font-weight: 800;
+    color: #fecaca;
+    letter-spacing: 0.02em;
+    margin: 0 0 0.35rem;
+}
+.ack-danger-sub {
+    color: #fca5a5;
+    font-size: 0.95rem;
+    margin: 0 0 0.85rem;
+    line-height: 1.45;
+}
+.ack-tool-row {
+    background: rgba(0, 0, 0, 0.35);
+    border: 1px solid rgba(248, 113, 113, 0.45);
+    border-radius: 8px;
+    padding: 0.7rem 0.85rem;
+    margin: 0.45rem 0;
+    color: #fee2e2;
+    font-size: 0.98rem;
+    line-height: 1.4;
+}
+.ack-tool-row strong { color: #fff; }
+
+/* Force acknowledgment dialog chrome to read as alert */
+div[data-testid="stDialog"] > div {
+    border: 3px solid #ef4444 !important;
+    box-shadow: 0 0 0 6px rgba(239, 68, 68, 0.2) !important;
+}
+
+.overdue-alert {
+    margin: 0.35rem 0 0.15rem;
+    padding: 0.85rem 1rem;
+    border-radius: 10px;
+    background: rgba(234, 88, 12, 0.10);
+    border: 1px solid rgba(234, 88, 12, 0.35);
+}
+.overdue-title {
+    font-family: 'Barlow Condensed', sans-serif;
+    font-size: 1.15rem; font-weight: 700; color: #fed7aa;
+}
+.overdue-meta { font-size: 0.9rem; color: #d6d3d1; margin-top: 0.2rem; }
 
 div[data-testid="stTabs"] button[data-baseweb="tab"] {
     font-family: 'Barlow Condensed', sans-serif;

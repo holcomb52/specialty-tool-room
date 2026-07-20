@@ -5,9 +5,9 @@ from __future__ import annotations
 import copy
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from lib.specialty_tools_import import empty_inventory
 
@@ -19,10 +19,253 @@ LIVE_PATH = DATA_DIR / "specialty_tools.json"
 SEED_PATH = DATA_DIR / "specialty_tools_seed.json"
 
 HISTORY_LIMIT = 500
+OVERDUE_AFTER_DAYS = 5
+
+ACCOUNTABILITY_LOCATED = "located"
+ACCOUNTABILITY_SIGNED_OUT = "signed_out"
+ACCOUNTABILITY_UNACCOUNTED = "unaccounted"
+ACCOUNTABILITY_OPTIONS = (
+    ACCOUNTABILITY_LOCATED,
+    ACCOUNTABILITY_SIGNED_OUT,
+    ACCOUNTABILITY_UNACCOUNTED,
+)
+ACCOUNTABILITY_LABELS = {
+    ACCOUNTABILITY_LOCATED: "Located",
+    ACCOUNTABILITY_SIGNED_OUT: "Signed out",
+    ACCOUNTABILITY_UNACCOUNTED: "Unaccounted for",
+}
+
+
+def normalize_accountability(value: Any) -> str:
+    raw = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if raw in {"signedout", "checked_out", "checkedout", "out"}:
+        return ACCOUNTABILITY_SIGNED_OUT
+    if raw in {"missing", "lost", "unaccounted_for", "unaccounted"}:
+        return ACCOUNTABILITY_UNACCOUNTED
+    if raw in {"found", "located", "ok"}:
+        return ACCOUNTABILITY_LOCATED
+    if raw in ACCOUNTABILITY_OPTIONS:
+        return raw
+    return ""
 
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _parse_iso(iso: str) -> Optional[datetime]:
+    raw = str(iso or "").strip()
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _today_local() -> date:
+    return datetime.now(timezone.utc).astimezone().date()
+
+
+def days_checked_out(checkout: Dict[str, Any]) -> int:
+    at = _parse_iso(str(checkout.get("checked_out_at") or ""))
+    if not at:
+        return 0
+    now = datetime.now(timezone.utc)
+    return max(0, (now - at).days)
+
+
+def format_duration(start_iso: str, end_iso: str = "") -> str:
+    """Human duration between two ISO timestamps (end defaults to now)."""
+    start = _parse_iso(str(start_iso or ""))
+    if not start:
+        return "—"
+    end = _parse_iso(str(end_iso or "")) if end_iso else datetime.now(timezone.utc)
+    if end is None:
+        end = datetime.now(timezone.utc)
+    if end < start:
+        return "—"
+    delta = end - start
+    days = delta.days
+    hours = delta.seconds // 3600
+    minutes = (delta.seconds % 3600) // 60
+    if days:
+        if hours:
+            return f"{days} day{'s' if days != 1 else ''}, {hours}h"
+        return f"{days} day{'s' if days != 1 else ''}"
+    if hours:
+        return f"{hours}h {minutes}m" if minutes else f"{hours}h"
+    if minutes:
+        return f"{minutes}m"
+    return "< 1m"
+
+
+def format_report_when(iso: str) -> str:
+    dt = _parse_iso(str(iso or ""))
+    if not dt:
+        return "—"
+    return dt.astimezone().strftime("%m/%d/%Y %I:%M %p")
+
+
+def checkout_report_rows(
+    checkouts: List[Dict[str, Any]],
+    *,
+    still_out_label: str = "Still out",
+) -> List[Dict[str, Any]]:
+    """Normalize active checkouts into report table rows."""
+    rows: List[Dict[str, Any]] = []
+    for checkout in checkouts:
+        start = str(checkout.get("checked_out_at") or "")
+        rows.append(
+            {
+                "tool_no": checkout.get("tool_no", ""),
+                "description": checkout.get("description", ""),
+                "tech_name": checkout.get("tech_name", ""),
+                "qty": checkout.get("qty", 1),
+                "signed_out": format_report_when(start),
+                "signed_in": still_out_label,
+                "duration": format_duration(start),
+                "days_out": days_checked_out(checkout),
+                "ro_number": checkout.get("ro_number", ""),
+                "note": checkout.get("note", ""),
+                "checked_out_at": start,
+            }
+        )
+    rows.sort(
+        key=lambda r: (int(r.get("days_out") or 0), str(r.get("checked_out_at") or "")),
+        reverse=True,
+    )
+    return rows
+
+
+def all_open_checkout_report_rows(data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    return checkout_report_rows(list(data.get("active_checkouts") or []))
+
+
+def returned_tool_report_rows(
+    data: Dict[str, Any], *, limit: int = 150
+) -> List[Dict[str, Any]]:
+    """Completed check-ins with signed-out / signed-in times and duration held."""
+    rows: List[Dict[str, Any]] = []
+    for entry in data.get("history") or []:
+        if entry.get("action") != "checkin":
+            continue
+        start = str(entry.get("checked_out_at") or "")
+        end = str(entry.get("at") or "")
+        days = 0
+        start_dt = _parse_iso(start)
+        end_dt = _parse_iso(end)
+        if start_dt and end_dt and end_dt >= start_dt:
+            days = (end_dt - start_dt).days
+        rows.append(
+            {
+                "tool_no": entry.get("tool_no", ""),
+                "description": entry.get("description", ""),
+                "tech_name": entry.get("tech_name", ""),
+                "qty": entry.get("qty", 1),
+                "signed_out": format_report_when(start) if start else "—",
+                "signed_in": format_report_when(end) if end else "—",
+                "duration": format_duration(start, end) if start and end else "—",
+                "days_out": days,
+                "ro_number": entry.get("ro_number", ""),
+                "note": entry.get("note", ""),
+                "checked_out_at": start,
+            }
+        )
+        if len(rows) >= limit:
+            break
+    return rows
+
+
+def checkouts_for_technician(
+    data: Dict[str, Any], tech_name: str
+) -> List[Dict[str, Any]]:
+    """Active checkouts for one technician, longest out first."""
+    needle = str(tech_name or "").strip().lower()
+    if not needle:
+        return []
+    matched = [
+        c
+        for c in data.get("active_checkouts") or []
+        if str(c.get("tech_name") or "").strip().lower() == needle
+    ]
+    return checkout_report_rows(matched)
+
+
+def technicians_with_open_checkouts(data: Dict[str, Any]) -> List[str]:
+    names = {
+        str(c.get("tech_name") or "").strip()
+        for c in data.get("active_checkouts") or []
+        if str(c.get("tech_name") or "").strip()
+    }
+    return sorted(names, key=lambda n: (n.split()[0].lower() if n.split() else n.lower(), n.lower()))
+
+
+def is_overdue_alert_dismissed(
+    checkout: Dict[str, Any], *, today: Optional[date] = None
+) -> bool:
+    """True when alert is snoozed until a future date (returns on that date)."""
+    until_raw = checkout.get("alert_dismissed_until")
+    if not until_raw:
+        return False
+    try:
+        until = date.fromisoformat(str(until_raw)[:10])
+    except ValueError:
+        return False
+    current = today or _today_local()
+    return current < until
+
+
+def list_overdue_checkouts(
+    data: Dict[str, Any],
+    *,
+    days: int = OVERDUE_AFTER_DAYS,
+    today: Optional[date] = None,
+) -> List[Dict[str, Any]]:
+    """Active checkouts out for `days` or more that are not snoozed."""
+    overdue: List[Dict[str, Any]] = []
+    for checkout in data.get("active_checkouts") or []:
+        out_days = days_checked_out(checkout)
+        if out_days < days:
+            continue
+        if is_overdue_alert_dismissed(checkout, today=today):
+            continue
+        item = dict(checkout)
+        item["days_out"] = out_days
+        overdue.append(item)
+    overdue.sort(key=lambda c: int(c.get("days_out") or 0), reverse=True)
+    return overdue
+
+
+def dismiss_overdue_alert(
+    data: Dict[str, Any],
+    checkout_id: str,
+    until: Union[date, str],
+    *,
+    today: Optional[date] = None,
+) -> Tuple[bool, str]:
+    """Hide the overdue alert for a checkout until the given date."""
+    if isinstance(until, str):
+        try:
+            until_date = date.fromisoformat(str(until)[:10])
+        except ValueError:
+            return False, "Pick a valid date."
+    else:
+        until_date = until
+
+    current = today or _today_local()
+    if until_date <= current:
+        return False, "Pick a future date to dismiss the alert until."
+
+    for checkout in data.get("active_checkouts") or []:
+        if checkout.get("id") == checkout_id:
+            checkout["alert_dismissed_until"] = until_date.isoformat()
+            tool_no = checkout.get("tool_no") or "tool"
+            return True, f"Alert for {tool_no} hidden until {until_date.strftime('%m/%d/%Y')}."
+    return False, "Checkout not found."
 
 
 def _normalize(data: Dict[str, Any] | None) -> Dict[str, Any]:
@@ -135,7 +378,11 @@ def load_inventory() -> Dict[str, Any]:
 def save_inventory(data: Dict[str, Any]) -> Tuple[bool, str]:
     normalized = _normalize(data)
     _save_local(normalized)
-    return _save_remote(normalized)
+    ok, err = _save_remote(normalized)
+    if not ok:
+        # Keep local store; cloud sync can be fixed later
+        return True, err or ""
+    return True, ""
 
 
 def _append_history(data: Dict[str, Any], entry: Dict[str, Any]) -> None:
@@ -236,6 +483,7 @@ def checkin_checkout(data: Dict[str, Any], checkout_id: str, note: str = "") -> 
     if not match:
         return False, "Checkout not found."
     data["active_checkouts"] = remaining
+    checked_in_at = _now_iso()
     _append_history(
         data,
         {
@@ -248,7 +496,8 @@ def checkin_checkout(data: Dict[str, Any], checkout_id: str, note: str = "") -> 
             "qty": match.get("qty", 1),
             "note": str(note or "").strip() or match.get("note", ""),
             "ro_number": match.get("ro_number", ""),
-            "at": _now_iso(),
+            "at": checked_in_at,
+            "checked_out_at": match.get("checked_out_at", ""),
             "checkout_id": checkout_id,
         },
     )
@@ -319,6 +568,7 @@ def update_tool(
     location: Optional[str] = None,
     notes: Optional[str] = None,
     status: Optional[str] = None,
+    accountability: Optional[str] = None,
 ) -> Tuple[bool, str]:
     tool = find_tool(data, tool_id)
     if not tool:
@@ -333,6 +583,13 @@ def update_tool(
         tool["notes"] = str(notes).strip()
     if status is not None and status in ("active", "non_current"):
         tool["status"] = status
+    if accountability is not None:
+        tool["accountability"] = normalize_accountability(accountability)
+    acct = normalize_accountability(tool.get("accountability"))
+    loc = tool.get("location") or "(none)"
+    note = f"Location set to {loc}"
+    if acct:
+        note += f" · {ACCOUNTABILITY_LABELS.get(acct, acct)}"
     _append_history(
         data,
         {
@@ -343,12 +600,52 @@ def update_tool(
             "description": tool.get("description", ""),
             "tech_name": "",
             "qty": tool.get("quantity", 1),
-            "note": f"Location set to {tool.get('location') or '(none)'}",
+            "note": note,
             "ro_number": "",
             "at": _now_iso(),
         },
     )
     return True, f"Updated {tool.get('tool_no')}."
+
+
+def _tool_no_key(tool: Dict[str, Any] | None) -> str:
+    if not isinstance(tool, dict):
+        return ""
+    return str(tool.get("tool_no") or "").strip().lower()
+
+
+def _dedupe_imported_tools(
+    imported_tools: List[Dict[str, Any]],
+) -> Tuple[List[Dict[str, Any]], int]:
+    """One row per tool #. Prefer active over non-current; fill empty location from later rows."""
+    by_no: Dict[str, Dict[str, Any]] = {}
+    duplicates = 0
+    for raw in imported_tools or []:
+        if not isinstance(raw, dict):
+            continue
+        key = _tool_no_key(raw)
+        if not key:
+            continue
+        tool = copy.deepcopy(raw)
+        if key not in by_no:
+            by_no[key] = tool
+            continue
+        duplicates += 1
+        current = by_no[key]
+        incoming_active = tool.get("status") == "active"
+        current_non = current.get("status") == "non_current"
+        if incoming_active and current_non:
+            kept_loc = str(current.get("location") or "").strip() or str(
+                tool.get("location") or ""
+            ).strip()
+            by_no[key] = tool
+            if kept_loc:
+                by_no[key]["location"] = kept_loc
+        elif not str(current.get("location") or "").strip() and str(
+            tool.get("location") or ""
+        ).strip():
+            current["location"] = str(tool.get("location")).strip()
+    return list(by_no.values()), duplicates
 
 
 def replace_tools_from_import(
@@ -358,15 +655,48 @@ def replace_tools_from_import(
     source: str,
     keep_checkouts: bool = True,
 ) -> Dict[str, Any]:
+    """
+    Refresh catalog from an imported spreadsheet.
+
+    Rules:
+    - Duplicate tool numbers collapse to a single entry.
+    - If this system already has a location for a tool #, that location wins.
+    """
+    existing_by_no = {
+        key: tool
+        for tool in data.get("tools") or []
+        if (key := _tool_no_key(tool))
+    }
+    deduped, duplicate_count = _dedupe_imported_tools(imported_tools)
+
+    location_kept = 0
+    merged_tools: List[Dict[str, Any]] = []
+    for tool in deduped:
+        item = copy.deepcopy(tool)
+        key = _tool_no_key(item)
+        prev = existing_by_no.get(key)
+        if prev:
+            # Keep stable id so open checkouts / history stay linked
+            if prev.get("id"):
+                item["id"] = prev["id"]
+            prev_loc = str(prev.get("location") or "").strip()
+            if prev_loc:
+                item["location"] = prev_loc
+                location_kept += 1
+            prev_acct = normalize_accountability(prev.get("accountability"))
+            if prev_acct:
+                item["accountability"] = prev_acct
+        merged_tools.append(item)
+
     new_data = empty_inventory(source)
-    new_data["tools"] = copy.deepcopy(imported_tools)
+    new_data["tools"] = merged_tools
     new_data["history"] = list(data.get("history") or [])
 
     if keep_checkouts:
         by_no = {
-            str(t.get("tool_no") or "").strip().lower(): t
-            for t in new_data["tools"]
-            if str(t.get("tool_no") or "").strip()
+            key: tool
+            for tool in new_data["tools"]
+            if (key := _tool_no_key(tool))
         }
         preserved = []
         for checkout in data.get("active_checkouts") or []:
@@ -380,6 +710,11 @@ def replace_tools_from_import(
             preserved.append(item)
         new_data["active_checkouts"] = preserved
 
+    note_bits = [f"Imported {len(merged_tools)} tools from {source}"]
+    if duplicate_count:
+        note_bits.append(f"removed {duplicate_count} duplicate tool # row(s)")
+    if location_kept:
+        note_bits.append(f"kept {location_kept} existing location(s)")
     _append_history(
         new_data,
         {
@@ -389,25 +724,51 @@ def replace_tools_from_import(
             "tool_no": "",
             "description": "",
             "tech_name": "",
-            "qty": len(imported_tools),
-            "note": f"Imported {len(imported_tools)} tools from {source}",
+            "qty": len(merged_tools),
+            "note": "; ".join(note_bits),
             "ro_number": "",
             "at": _now_iso(),
+            "duplicates_removed": duplicate_count,
+            "locations_kept": location_kept,
         },
     )
+    # Stash merge stats for the UI success message
+    new_data["_import_stats"] = {
+        "tools": len(merged_tools),
+        "duplicates_removed": duplicate_count,
+        "locations_kept": location_kept,
+    }
     return new_data
 
 
 def inventory_stats(data: Dict[str, Any]) -> Dict[str, int]:
     tools = data.get("tools") or []
     checkouts = data.get("active_checkouts") or []
+    without_location = 0
+    unaccounted = 0
+    for t in tools:
+        acct = normalize_accountability(t.get("accountability"))
+        if acct == ACCOUNTABILITY_UNACCOUNTED:
+            unaccounted += 1
+            continue
+        if not str(t.get("location") or "").strip():
+            without_location += 1
     return {
         "total": len(tools),
         "active": sum(1 for t in tools if t.get("status") == "active"),
         "non_current": sum(1 for t in tools if t.get("status") == "non_current"),
         "out_now": len(checkouts),
         "units_out": sum(int(c.get("qty") or 1) for c in checkouts),
-        "with_location": sum(1 for t in tools if str(t.get("location") or "").strip()),
+        "with_location": sum(
+            1
+            for t in tools
+            if str(t.get("location") or "").strip()
+            and normalize_accountability(t.get("accountability"))
+            != ACCOUNTABILITY_UNACCOUNTED
+        ),
+        "without_location": without_location,
+        "unaccounted": unaccounted,
+        "overdue": len(list_overdue_checkouts(data)),
     }
 
 
@@ -418,6 +779,9 @@ def search_tools(
     status: str = "active",
     location: str = "",
     only_out: bool = False,
+    only_with_location: bool = False,
+    only_without_location: bool = False,
+    only_unaccounted: bool = False,
 ) -> List[Dict[str, Any]]:
     q = str(query or "").strip().lower()
     loc_filter = str(location or "").strip().lower()
@@ -428,8 +792,19 @@ def search_tools(
             continue
         if only_out and tool.get("id") not in out_ids:
             continue
-        tool_loc = str(tool.get("location") or "").strip().lower()
-        if loc_filter and loc_filter not in tool_loc:
+        acct = normalize_accountability(tool.get("accountability"))
+        tool_loc = str(tool.get("location") or "").strip()
+        if only_unaccounted:
+            if acct != ACCOUNTABILITY_UNACCOUNTED:
+                continue
+        else:
+            if only_with_location and (not tool_loc or acct == ACCOUNTABILITY_UNACCOUNTED):
+                continue
+            if only_without_location and (
+                tool_loc or acct == ACCOUNTABILITY_UNACCOUNTED
+            ):
+                continue
+        if loc_filter and loc_filter not in tool_loc.lower():
             continue
         if q:
             hay = " ".join(
@@ -438,6 +813,7 @@ def search_tools(
                     str(tool.get("description") or ""),
                     str(tool.get("location") or ""),
                     str(tool.get("notes") or ""),
+                    acct,
                 ]
             ).lower()
             if q not in hay:
@@ -445,6 +821,7 @@ def search_tools(
         enriched = dict(tool)
         enriched["qty_out"] = qty_out(data, tool["id"])
         enriched["qty_available"] = qty_available(data, tool)
+        enriched["accountability"] = acct
         results.append(enriched)
     results.sort(key=lambda t: str(t.get("sort_order") or t.get("tool_no") or ""))
     return results

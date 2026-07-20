@@ -18,8 +18,19 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _first_name_sort_key(name: str) -> tuple[str, str]:
+    """Sort by first name, then full name (case-insensitive)."""
+    cleaned = str(name).strip()
+    parts = cleaned.split()
+    first = parts[0].lower() if parts else ""
+    return (first, cleaned.lower())
+
+
 def _normalize(names: List[str] | None) -> List[str]:
-    cleaned = sorted({str(n).strip() for n in (names or []) if str(n).strip()}, key=str.lower)
+    cleaned = sorted(
+        {str(n).strip() for n in (names or []) if str(n).strip()},
+        key=_first_name_sort_key,
+    )
     return cleaned
 
 
@@ -105,7 +116,11 @@ def load_technicians() -> List[str]:
 def save_technicians(names: List[str]) -> Tuple[bool, str]:
     cleaned = _normalize(names)
     _save_local(cleaned)
-    return _save_remote(cleaned)
+    ok, err = _save_remote(cleaned)
+    if not ok:
+        # Local save already succeeded — keep working offline / without Supabase
+        return True, err or ""
+    return True, ""
 
 
 def add_technician(names: List[str], name: str) -> Tuple[bool, str, List[str]]:

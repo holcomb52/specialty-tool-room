@@ -6,4 +6,5 @@ venv/
 .streamlit/secrets.toml
 .DS_Store
 data/specialty_tools.json
+data/admin_users.json
 *.pem
