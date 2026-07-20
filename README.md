@@ -19,7 +19,7 @@ cd ~/Projects/specialty-tool-room
 python3 -m venv .venv
 source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-streamlit run app.py
+streamlit run app.py --server.port 8511
 ```
 
 Opens at [http://localhost:8511](http://localhost:8511).
