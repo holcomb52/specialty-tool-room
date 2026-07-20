@@ -935,6 +935,10 @@ elif page == "Add Tool":
     if not is_admin():
         st.warning("Admin login required.")
         st.stop()
+    # Clear form keys before widgets render (cannot mutate widget keys after creation)
+    if st.session_state.pop("_clear_add_form", None):
+        for key in ("add_no", "add_desc", "add_notes", "add_loc", "add_qty", "add_status"):
+            st.session_state.pop(key, None)
     _show_flash()
     st.markdown("##### Add a new specialty tool")
     a1, a2 = st.columns(2)
@@ -971,10 +975,7 @@ elif page == "Add Tool":
             _persist(data)
             saved_no = (tool or {}).get("tool_no") or str(tool_no).strip()
             _set_flash(f"Saved — {saved_no} was added to inventory.")
-            for key in ("add_no", "add_desc", "add_notes", "add_loc"):
-                st.session_state.pop(key, None)
-            st.session_state["add_qty"] = 1
-            st.session_state["add_status"] = "active"
+            st.session_state["_clear_add_form"] = True
             st.rerun()
         else:
             st.error(msg)
