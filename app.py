@@ -224,6 +224,27 @@ def _persist(data) -> None:
         st.session_state.pop("_sync_error", None)
 
 
+def _set_flash(message: str, kind: str = "success") -> None:
+    st.session_state["_flash"] = {"message": message, "kind": kind}
+
+
+def _show_flash() -> None:
+    flash = st.session_state.pop("_flash", None)
+    if not flash:
+        return
+    msg = str(flash.get("message") or "")
+    kind = str(flash.get("kind") or "success")
+    if not msg:
+        return
+    st.markdown(status_banner(msg, kind), unsafe_allow_html=True)
+    if kind == "error":
+        st.error(msg)
+    elif kind == "warn":
+        st.warning(msg)
+    else:
+        st.success(msg)
+
+
 def _tech_names() -> list[str]:
     # Always reload so local saves (and failed-cloud cases) stay in sync
     st.session_state.tech_names = _normalize(load_technicians())
@@ -907,6 +928,7 @@ elif page == "Add Tool":
     if not is_admin():
         st.warning("Admin login required.")
         st.stop()
+    _show_flash()
     st.markdown("##### Add a new specialty tool")
     a1, a2 = st.columns(2)
     with a1:
@@ -929,7 +951,7 @@ elif page == "Add Tool":
             key="add_status",
         )
     if st.button("Add tool to inventory", type="primary", use_container_width=True, key="add_btn"):
-        ok, msg, _tool = add_tool(
+        ok, msg, tool = add_tool(
             data,
             tool_no=tool_no,
             description=description,
@@ -940,7 +962,12 @@ elif page == "Add Tool":
         )
         if ok:
             _persist(data)
-            st.success(msg)
+            saved_no = (tool or {}).get("tool_no") or str(tool_no).strip()
+            _set_flash(f"Saved — {saved_no} was added to inventory.")
+            for key in ("add_no", "add_desc", "add_notes", "add_loc"):
+                st.session_state.pop(key, None)
+            st.session_state["add_qty"] = 1
+            st.session_state["add_status"] = "active"
             st.rerun()
         else:
             st.error(msg)
