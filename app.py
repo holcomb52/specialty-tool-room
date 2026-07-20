@@ -935,31 +935,53 @@ elif page == "Add Tool":
     if not is_admin():
         st.warning("Admin login required.")
         st.stop()
-    # Clear form keys before widgets render (cannot mutate widget keys after creation)
+    if "add_form_nonce" not in st.session_state:
+        st.session_state.add_form_nonce = 0
+    # Remount inputs with a new key suffix so the form is blank after a save
     if st.session_state.pop("_clear_add_form", None):
-        for key in ("add_no", "add_desc", "add_notes", "add_loc", "add_qty", "add_status"):
+        old = int(st.session_state.add_form_nonce)
+        for key in (
+            f"add_no_{old}",
+            f"add_desc_{old}",
+            f"add_notes_{old}",
+            f"add_loc_{old}",
+            f"add_qty_{old}",
+            f"add_status_{old}",
+        ):
             st.session_state.pop(key, None)
+        st.session_state.add_form_nonce = old + 1
+    form_id = int(st.session_state.add_form_nonce)
     _show_flash()
     st.markdown("##### Add a new specialty tool")
     a1, a2 = st.columns(2)
     with a1:
-        tool_no = st.text_input("Tool number", key="add_no", placeholder="e.g. 2081700090")
-        qty = st.number_input("Quantity", min_value=1, value=1, key="add_qty")
+        tool_no = st.text_input(
+            "Tool number",
+            key=f"add_no_{form_id}",
+            placeholder="e.g. 2081700090",
+        )
+        qty = st.number_input(
+            "Quantity", min_value=1, value=1, key=f"add_qty_{form_id}"
+        )
         location = st.text_input(
             "Special location / assignment",
-            key="add_loc",
+            key=f"add_loc_{form_id}",
             placeholder="e.g. SHELF D / WALL 14",
         )
     with a2:
         description = st.text_input(
-            "Description", key="add_desc", placeholder="STRETCH BELT TOOL"
+            "Description",
+            key=f"add_desc_{form_id}",
+            placeholder="STRETCH BELT TOOL",
         )
-        notes = st.text_input("Notes", key="add_notes", placeholder="NEW TOOL")
+        notes = st.text_input(
+            "Notes", key=f"add_notes_{form_id}", placeholder="NEW TOOL"
+        )
         status = st.selectbox(
             "Status",
             options=["active", "non_current"],
             format_func=lambda s: "Active" if s == "active" else "Non-current",
-            key="add_status",
+            key=f"add_status_{form_id}",
         )
     if st.button("Add tool to inventory", type="primary", use_container_width=True, key="add_btn"):
         ok, msg, tool = add_tool(
