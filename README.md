@@ -30,16 +30,16 @@ Full walkthrough: **[DEPLOY-CLOUD.md](DEPLOY-CLOUD.md)**
 
 Quick summary:
 
-1. Run `supabase/schema.sql` in Supabase (same project as Fixed Ops Hub is fine)
-2. Push this repo to GitHub
+1. Create a **new** Supabase project for this app only (do not reuse Fixed Ops Hub)
+2. SQL Editor → run `supabase/schema.sql`
 3. Deploy at [share.streamlit.io](https://share.streamlit.io) with secrets from `streamlit-cloud-secrets.example.toml`
 4. Bookmark your `https://….streamlit.app` URL
 
-## Supabase (recommended for cloud / multi-PC)
+## Supabase (this project only)
 
-1. Create a Supabase project (or reuse Fixed Ops Hub’s)
+1. Create a **dedicated** Supabase project named e.g. `specialty-tool-room`
 2. SQL Editor → run `supabase/schema.sql`
-3. Copy Project URL + **service_role** key into `.streamlit/secrets.toml` or Streamlit Cloud secrets:
+3. Copy that project’s URL + **service_role** key into `.streamlit/secrets.toml` or Streamlit Cloud secrets:
 
 ```toml
 SUPABASE_URL = "https://YOUR_PROJECT.supabase.co"

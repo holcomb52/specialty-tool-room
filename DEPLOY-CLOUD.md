@@ -18,13 +18,15 @@ Bookmark that in Google Chrome on every device.
 
 ---
 
-## Step 1 — Supabase database
+## Step 1 — Supabase database (this app only)
 
-You can use the **same Supabase project** as Fixed Ops Hub, or create a new one.
+Create a **new** Supabase project just for Specialty Tool Room. Do **not** reuse Fixed Ops Hub or any other app’s project.
 
-1. Open **SQL Editor → New query**.
-2. Paste everything from `supabase/schema.sql` and click **Run**.
-3. Go to **Project Settings → API** and copy:
+1. Go to [supabase.com](https://supabase.com) → **New project**.
+2. Name it something like `specialty-tool-room`.
+3. Open **SQL Editor → New query**.
+4. Paste everything from `supabase/schema.sql` and click **Run**.
+5. Go to **Project Settings → API** and copy:
    - **Project URL**
    - **service_role** key (keep this secret)
 
