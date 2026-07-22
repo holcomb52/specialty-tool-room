@@ -436,6 +436,9 @@ def checkout_tool(
     tech = str(tech_name or "").strip()
     if not tech:
         return False, "Select a technician."
+    clean_ro = str(ro_number or "").strip()
+    if not clean_ro:
+        return False, "Enter an RO number."
     take = max(1, int(qty or 1))
     available = qty_available(data, tool)
     if take > available:
@@ -450,7 +453,7 @@ def checkout_tool(
         "qty": take,
         "checked_out_at": _now_iso(),
         "note": str(note or "").strip(),
-        "ro_number": str(ro_number or "").strip(),
+        "ro_number": clean_ro,
     }
     data.setdefault("active_checkouts", []).append(checkout)
     _append_history(
@@ -504,6 +507,70 @@ def checkin_checkout(data: Dict[str, Any], checkout_id: str, note: str = "") -> 
     return True, f"Checked in {match.get('tool_no')} from {match.get('tech_name')}."
 
 
+def update_checkout(
+    data: Dict[str, Any],
+    checkout_id: str,
+    *,
+    tech_name: Optional[str] = None,
+    ro_number: Optional[str] = None,
+    note: Optional[str] = None,
+) -> Tuple[bool, str]:
+    """Correct fields on an open checkout (e.g. wrong technician selected)."""
+    checkouts = list(data.get("active_checkouts") or [])
+    match = None
+    for item in checkouts:
+        if item.get("id") == checkout_id:
+            match = item
+            break
+    if not match:
+        return False, "Checkout not found."
+
+    changes: List[str] = []
+    if tech_name is not None:
+        clean_tech = str(tech_name or "").strip()
+        if not clean_tech:
+            return False, "Select a technician."
+        old_tech = str(match.get("tech_name") or "")
+        if clean_tech != old_tech:
+            match["tech_name"] = clean_tech
+            changes.append(f"tech {old_tech or '(blank)'} → {clean_tech}")
+    if ro_number is not None:
+        clean_ro = str(ro_number or "").strip()
+        if not clean_ro:
+            return False, "Enter an RO number."
+        old_ro = str(match.get("ro_number") or "")
+        if clean_ro != old_ro:
+            match["ro_number"] = clean_ro
+            changes.append(f"RO {old_ro or '(blank)'} → {clean_ro}")
+    if note is not None:
+        clean_note = str(note or "").strip()
+        old_note = str(match.get("note") or "")
+        if clean_note != old_note:
+            match["note"] = clean_note
+            changes.append("note updated")
+
+    if not changes:
+        return False, "No changes to save."
+
+    _append_history(
+        data,
+        {
+            "id": str(uuid.uuid4()),
+            "action": "checkout_corrected",
+            "tool_id": match.get("tool_id", ""),
+            "tool_no": match.get("tool_no", ""),
+            "description": match.get("description", ""),
+            "tech_name": match.get("tech_name", ""),
+            "qty": match.get("qty", 1),
+            "note": "; ".join(changes),
+            "ro_number": match.get("ro_number", ""),
+            "at": _now_iso(),
+            "checkout_id": checkout_id,
+        },
+    )
+    return True, f"Updated {match.get('tool_no')}: {'; '.join(changes)}."
+
+
 def add_tool(
     data: Dict[str, Any],
     *,
@@ -514,8 +581,8 @@ def add_tool(
     notes: str = "",
     status: str = "active",
 ) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
-    clean_no = str(tool_no or "").strip()
-    clean_desc = str(description or "").strip()
+    clean_no = str(tool_no or "").strip().upper()
+    clean_desc = str(description or "").strip().upper()
     if not clean_no:
         return False, "Tool number is required.", None
     if not clean_desc:
@@ -529,8 +596,8 @@ def add_tool(
         "tool_no": clean_no,
         "description": clean_desc,
         "quantity": max(1, int(quantity or 1)),
-        "location": str(location or "").strip(),
-        "notes": str(notes or "").strip(),
+        "location": str(location or "").strip().upper(),
+        "notes": str(notes or "").strip().upper(),
         "sort_order": clean_no,
         "status": status if status in ("active", "non_current") else "active",
         "brand_flags": {
@@ -574,13 +641,13 @@ def update_tool(
     if not tool:
         return False, "Tool not found."
     if description is not None:
-        tool["description"] = str(description).strip()
+        tool["description"] = str(description).strip().upper()
     if quantity is not None:
         tool["quantity"] = max(1, int(quantity))
     if location is not None:
-        tool["location"] = str(location).strip()
+        tool["location"] = str(location).strip().upper()
     if notes is not None:
-        tool["notes"] = str(notes).strip()
+        tool["notes"] = str(notes).strip().upper()
     if status is not None and status in ("active", "non_current"):
         tool["status"] = status
     if accountability is not None:

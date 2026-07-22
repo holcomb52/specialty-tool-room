@@ -14,6 +14,7 @@ from lib.specialty_tools_storage import (
     list_overdue_checkouts,
     qty_available,
     search_tools,
+    update_checkout,
 )
 from lib.tech_list import _normalize
 
@@ -48,10 +49,19 @@ def test_checkout_and_checkin_cycle():
     assert ok, msg
     assert qty_available(data, tool) == 0
 
-    ok, msg = checkout_tool(data, tool["id"], "Alex Rivera", qty=1)
+    ok, msg = checkout_tool(data, tool["id"], "Alex Rivera", qty=1, ro_number="RO2")
     assert not ok
 
+    ok, msg = checkout_tool(data, tool["id"], "Alex Rivera", qty=1, ro_number="")
+    assert not ok
+    assert "RO" in msg
+
     checkout_id = data["active_checkouts"][0]["id"]
+    ok, msg = update_checkout(data, checkout_id, tech_name="Dale Potts")
+    assert ok, msg
+    assert data["active_checkouts"][0]["tech_name"] == "Dale Potts"
+    assert any(h.get("action") == "checkout_corrected" for h in data["history"])
+
     ok, msg = checkin_checkout(data, checkout_id)
     assert ok, msg
     assert qty_available(data, tool) == 1
@@ -60,7 +70,7 @@ def test_checkout_and_checkin_cycle():
 def test_overdue_alert_and_dismiss_until_date():
     data = _load_seed()
     tool = next(t for t in data["tools"] if t.get("tool_no") == "C-4150A")
-    ok, msg = checkout_tool(data, tool["id"], "Dale Potts", qty=1)
+    ok, msg = checkout_tool(data, tool["id"], "Dale Potts", qty=1, ro_number="RO-OVERDUE")
     assert ok, msg
 
     checkout = data["active_checkouts"][0]
@@ -93,7 +103,7 @@ def test_report_rows_and_pdf():
 
     data = _load_seed()
     tool = next(t for t in data["tools"] if t.get("tool_no") == "C-4150A")
-    ok, msg = checkout_tool(data, tool["id"], "Dale Potts", qty=1)
+    ok, msg = checkout_tool(data, tool["id"], "Dale Potts", qty=1, ro_number="RO-REPORT")
     assert ok, msg
     data["active_checkouts"][0]["checked_out_at"] = (
         datetime.now(timezone.utc) - timedelta(days=2)
@@ -153,7 +163,7 @@ def test_inventory_missing_goes_unaccounted_and_signed_out_blocks_mark():
     assert tool["inventory_result"] == "returned"
     assert not any(t["id"] == tid for t in search_tools(data, only_unaccounted=True))
 
-    ok, msg = checkout_tool(data, tid, "Dale Potts", qty=1)
+    ok, msg = checkout_tool(data, tid, "Dale Potts", qty=1, ro_number="RO-INV")
     assert ok, msg
     ok, msg = apply_inventory_mark(data, tid, "located")
     assert not ok

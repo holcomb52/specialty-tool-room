@@ -53,6 +53,7 @@ from lib.specialty_tools_storage import (
     search_tools,
     technicians_with_open_checkouts,
     unique_locations,
+    update_checkout,
     update_tool,
 )
 from lib.reports_pdf import build_checkout_report_pdf, build_inventory_report_pdf
@@ -233,6 +234,15 @@ def _persist(data) -> None:
 
 def _set_flash(message: str, kind: str = "success") -> None:
     st.session_state["_flash"] = {"message": message, "kind": kind}
+
+
+def _force_upper(key: str) -> None:
+    """Keep inventory text fields in ALL CAPS as the user types."""
+    val = st.session_state.get(key)
+    if isinstance(val, str):
+        uppered = val.upper()
+        if uppered != val:
+            st.session_state[key] = uppered
 
 
 def _show_flash() -> None:
@@ -539,13 +549,16 @@ if page == "Check Out / In":
                 )
             b1, b2 = st.columns(2)
             with b1:
-                ro = st.text_input("RO # (optional)", key="co_ro")
+                ro = st.text_input("RO #", key="co_ro", placeholder="Required")
             with b2:
                 note = st.text_input("Note (optional)", key="co_note")
             if st.button("Check out", type="primary", use_container_width=True, key="co_btn"):
                 tech_name = str(tech or "").strip()
+                ro_clean = str(ro or "").strip()
                 if not tech_name:
                     st.error("Select a technician.")
+                elif not ro_clean:
+                    st.error("Enter an RO number.")
                 else:
                     already_out = checkouts_for_technician(data, tech_name)
                     if already_out:
@@ -554,7 +567,7 @@ if page == "Check Out / In":
                             "tech": tech_name,
                             "qty": int(qty),
                             "note": note,
-                            "ro": ro,
+                            "ro": ro_clean,
                         }
                         st.rerun()
                     else:
@@ -564,7 +577,7 @@ if page == "Check Out / In":
                             tech_name,
                             qty=int(qty),
                             note=note,
-                            ro_number=ro,
+                            ro_number=ro_clean,
                         )
                         if ok:
                             _persist(data)
@@ -651,6 +664,81 @@ elif page == "Out Now":
             )
         ]
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+        st.markdown("---")
+        st.markdown("##### Correct technician / details")
+        st.caption("Use this if the wrong tech was selected when the tool was checked out.")
+        checkouts_sorted = sorted(
+            checkouts,
+            key=lambda x: (days_checked_out(x), str(x.get("checked_out_at") or "")),
+            reverse=True,
+        )
+        fix_labels = {
+            c["id"]: (
+                f"{c.get('tool_no')} — {c.get('tech_name') or '(no tech)'}"
+                + f"  (out {_fmt_when(c.get('checked_out_at', ''))})"
+            )
+            for c in checkouts_sorted
+        }
+        fix_id = st.selectbox(
+            "Checkout to correct",
+            options=list(fix_labels.keys()),
+            format_func=lambda i: fix_labels[i],
+            key="out_now_fix_id",
+        )
+        selected_fix = next((c for c in checkouts_sorted if c["id"] == fix_id), None)
+        techs = _tech_names()
+        current_tech = str((selected_fix or {}).get("tech_name") or "")
+        tech_options = list(techs)
+        if current_tech and current_tech not in tech_options:
+            tech_options = [current_tech] + tech_options
+        if not tech_options:
+            st.warning("Add technicians under Technicians first.")
+        else:
+            # Key by checkout id so fields refresh when a different row is selected
+            tech_key = f"out_now_fix_tech_{fix_id}"
+            ro_key = f"out_now_fix_ro_{fix_id}"
+            note_key = f"out_now_fix_note_{fix_id}"
+            if tech_key not in st.session_state:
+                st.session_state[tech_key] = (
+                    current_tech if current_tech in tech_options else tech_options[0]
+                )
+            if ro_key not in st.session_state:
+                st.session_state[ro_key] = str((selected_fix or {}).get("ro_number") or "")
+            if note_key not in st.session_state:
+                st.session_state[note_key] = str((selected_fix or {}).get("note") or "")
+
+            new_tech = st.selectbox(
+                "Correct technician",
+                options=tech_options,
+                key=tech_key,
+            )
+            f1, f2 = st.columns(2)
+            with f1:
+                new_ro = st.text_input("RO #", key=ro_key)
+            with f2:
+                new_note = st.text_input("Note", key=note_key)
+            if st.button(
+                "Save correction",
+                type="primary",
+                use_container_width=True,
+                key="out_now_fix_save",
+            ):
+                ok, msg = update_checkout(
+                    data,
+                    fix_id,
+                    tech_name=new_tech,
+                    ro_number=new_ro,
+                    note=new_note,
+                )
+                if ok:
+                    _persist(data)
+                    for key in (tech_key, ro_key, note_key):
+                        st.session_state.pop(key, None)
+                    st.success(msg)
+                    st.rerun()
+                else:
+                    st.error(msg)
 
 elif page == "Catalog":
     locs = ["(any location)"] + unique_locations(data)
@@ -766,8 +854,10 @@ elif page == "Catalog":
         with a1:
             assign_loc = st.text_input(
                 "Special location / assignment",
-                placeholder="e.g. SHELF D / WALL 14 (optional if Unaccounted)",
+                placeholder="E.G. SHELF D / WALL 14 (OPTIONAL IF UNACCOUNTED)",
                 key="assign_loc_value",
+                on_change=_force_upper,
+                args=("assign_loc_value",),
             )
         with a2:
             if "assign_acct_status" not in st.session_state:
@@ -864,8 +954,10 @@ elif page == "Catalog":
                 with e1:
                     new_loc = st.text_input(
                         "Special location / assignment",
-                        value=tool.get("location", ""),
+                        value=str(tool.get("location", "") or "").upper(),
                         key="edit_loc",
+                        on_change=_force_upper,
+                        args=("edit_loc",),
                     )
                     new_qty = st.number_input(
                         "Quantity on hand",
@@ -890,9 +982,19 @@ elif page == "Catalog":
                     )
                 with e2:
                     new_desc = st.text_input(
-                        "Description", value=tool.get("description", ""), key="edit_desc"
+                        "Description",
+                        value=str(tool.get("description", "") or "").upper(),
+                        key="edit_desc",
+                        on_change=_force_upper,
+                        args=("edit_desc",),
                     )
-                    new_notes = st.text_input("Notes", value=tool.get("notes", ""), key="edit_notes")
+                    new_notes = st.text_input(
+                        "Notes",
+                        value=str(tool.get("notes", "") or "").upper(),
+                        key="edit_notes",
+                        on_change=_force_upper,
+                        args=("edit_notes",),
+                    )
                     new_status = st.selectbox(
                         "Catalog status",
                         options=["active", "non_current"],
@@ -958,7 +1060,9 @@ elif page == "Add Tool":
         tool_no = st.text_input(
             "Tool number",
             key=f"add_no_{form_id}",
-            placeholder="e.g. 2081700090",
+            placeholder="E.G. 2081700090",
+            on_change=_force_upper,
+            args=(f"add_no_{form_id}",),
         )
         qty = st.number_input(
             "Quantity", min_value=1, value=1, key=f"add_qty_{form_id}"
@@ -966,16 +1070,24 @@ elif page == "Add Tool":
         location = st.text_input(
             "Special location / assignment",
             key=f"add_loc_{form_id}",
-            placeholder="e.g. SHELF D / WALL 14",
+            placeholder="E.G. SHELF D / WALL 14",
+            on_change=_force_upper,
+            args=(f"add_loc_{form_id}",),
         )
     with a2:
         description = st.text_input(
             "Description",
             key=f"add_desc_{form_id}",
             placeholder="STRETCH BELT TOOL",
+            on_change=_force_upper,
+            args=(f"add_desc_{form_id}",),
         )
         notes = st.text_input(
-            "Notes", key=f"add_notes_{form_id}", placeholder="NEW TOOL"
+            "Notes",
+            key=f"add_notes_{form_id}",
+            placeholder="NEW TOOL",
+            on_change=_force_upper,
+            args=(f"add_notes_{form_id}",),
         )
         status = st.selectbox(
             "Status",
