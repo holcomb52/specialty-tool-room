@@ -14,7 +14,8 @@ ROLE_TECH = "tech"
 
 # Manager — full access including managing Admin accounts
 MANAGER_PAGES = [
-    "Check Out / In",
+    "Check Out",
+    "Check In",
     "Out Now",
     "Catalog",
     "Reports",
@@ -27,7 +28,8 @@ MANAGER_PAGES = [
 
 # Admin accounts — full tool-room access, but cannot manage Admin users
 ADMIN_PAGES = [
-    "Check Out / In",
+    "Check Out",
+    "Check In",
     "Out Now",
     "Catalog",
     "Reports",
@@ -38,7 +40,8 @@ ADMIN_PAGES = [
 ]
 
 TECH_PAGES = [
-    "Check Out / In",
+    "Check Out",
+    "Check In",
     "Out Now",
     "Catalog",
     "Reports",

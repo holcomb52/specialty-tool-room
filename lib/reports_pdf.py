@@ -284,7 +284,7 @@ def build_checkout_report_pdf(
         story.append(Spacer(1, 0.1 * inch))
         story.append(
             Paragraph(
-                "Nothing is signed out right now. Check a tool out under Check Out / In, "
+                "Nothing is signed out right now. Check a tool out under Check Out, "
                 "then export this report again to see technician, signed-out time, and duration.",
                 styles["hint"],
             )

@@ -53,7 +53,7 @@ TECH_PASSWORD = "choose-a-shared-tech-password"
 |-----|----------------|---------|
 | Manager | `APP_PASSWORD` | Everything, including **Admin users** |
 | Admin | Username + password (added under Admin users) | Everything except **Admin users** |
-| Technician | Shared `TECH_PASSWORD` | Check Out / In, Out Now, Catalog (view), Reports, History |
+| Technician | Shared `TECH_PASSWORD` | Check Out, Check In, Out Now, Catalog (view), Reports, History |
 
 `APP_PASSWORD` also seeds a starter Admin account (`admin`) if none exist yet. Add more admins in-app under **Admin users**.
 
@@ -63,7 +63,8 @@ Without Supabase, the app still works locally using `data/specialty_tools.json`.
 
 | Screen | Purpose |
 |--------|---------|
-| Check Out / In | Search a tool, assign to a tech, return it later |
+| Check Out | Search a tool and assign it to a tech |
+| Check In | Return a tool that was signed out |
 | Out Now | Who has what right now |
 | Catalog | Search inventory, edit location / qty |
 | Reports | By tech / all out / returned — export PDF |

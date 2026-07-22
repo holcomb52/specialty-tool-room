@@ -293,6 +293,9 @@ with st.sidebar:
         unsafe_allow_html=True,
     )
     nav_pages = pages_for_role()
+    # Migrate old combined page name from earlier builds
+    if st.session_state.get("nav_page") == "Check Out / In":
+        st.session_state.nav_page = "Check Out"
     if "nav_page" not in st.session_state or st.session_state.nav_page not in nav_pages:
         st.session_state.nav_page = nav_pages[0]
     page = st.radio(
@@ -502,124 +505,122 @@ if overdue:
 
 st.markdown("<hr>", unsafe_allow_html=True)
 
-if page == "Check Out / In":
+if page == "Check Out":
     if st.session_state.get("co_pending"):
         _multi_tool_ack_dialog(data)
 
-    left, right = st.columns(2)
-    with left:
-        st.markdown("##### Check out a tool")
-        techs = _tech_names()
-        find = st.text_input(
-            "Find tool # or description",
-            placeholder="e.g. C-4150 or ball joint",
-            key="co_find",
+    st.markdown("##### Check out a tool")
+    techs = _tech_names()
+    find = st.text_input(
+        "Find tool # or description",
+        placeholder="e.g. C-4150 or ball joint",
+        key="co_find",
+    )
+    tools = search_tools(data, find, status="active")
+    available = [t for t in tools if t.get("qty_available", 0) > 0][:75]
+    if not find.strip():
+        st.caption("Type a tool number or keyword, then pick from the matches.")
+    if available:
+        labels = {
+            t["id"]: (
+                f"{t.get('tool_no')} — {t.get('description')}"
+                + (f"  [{t.get('location')}]" if t.get("location") else "")
+                + f"  ({t.get('qty_available')} avail)"
+            )
+            for t in available
+        }
+        pick = st.selectbox(
+            "Matching tools",
+            options=list(labels.keys()),
+            format_func=lambda i: labels[i],
+            key="co_tool",
         )
-        tools = search_tools(data, find, status="active")
-        available = [t for t in tools if t.get("qty_available", 0) > 0][:75]
-        if not find.strip():
-            st.caption("Type a tool number or keyword, then pick from the matches.")
-        if available:
-            labels = {
-                t["id"]: (
-                    f"{t.get('tool_no')} — {t.get('description')}"
-                    + (f"  [{t.get('location')}]" if t.get("location") else "")
-                    + f"  ({t.get('qty_available')} avail)"
-                )
-                for t in available
-            }
-            pick = st.selectbox(
-                "Matching tools",
-                options=list(labels.keys()),
-                format_func=lambda i: labels[i],
-                key="co_tool",
+        selected = next((t for t in available if t["id"] == pick), None)
+        a1, a2 = st.columns(2)
+        with a1:
+            if techs:
+                tech = st.selectbox("Technician", options=techs, key="co_tech")
+            else:
+                tech = st.text_input("Technician name", key="co_tech_manual")
+                st.caption("Add names under Technicians for a dropdown.")
+        with a2:
+            max_qty = int(selected.get("qty_available") or 1) if selected else 1
+            qty = st.number_input(
+                "Qty", min_value=1, max_value=max(1, max_qty), value=1, key="co_qty"
             )
-            selected = next((t for t in available if t["id"] == pick), None)
-            a1, a2 = st.columns(2)
-            with a1:
-                if techs:
-                    tech = st.selectbox("Technician", options=techs, key="co_tech")
-                else:
-                    tech = st.text_input("Technician name", key="co_tech_manual")
-                    st.caption("Add names under Technicians for a dropdown.")
-            with a2:
-                max_qty = int(selected.get("qty_available") or 1) if selected else 1
-                qty = st.number_input(
-                    "Qty", min_value=1, max_value=max(1, max_qty), value=1, key="co_qty"
-                )
-            b1, b2 = st.columns(2)
-            with b1:
-                ro = st.text_input("RO #", key="co_ro", placeholder="Required")
-            with b2:
-                note = st.text_input("Note (optional)", key="co_note")
-            if st.button("Check out", type="primary", use_container_width=True, key="co_btn"):
-                tech_name = str(tech or "").strip()
-                ro_clean = str(ro or "").strip()
-                if not tech_name:
-                    st.error("Select a technician.")
-                elif not ro_clean:
-                    st.error("Enter an RO number.")
-                else:
-                    already_out = checkouts_for_technician(data, tech_name)
-                    if already_out:
-                        st.session_state.co_pending = {
-                            "tool_id": pick,
-                            "tech": tech_name,
-                            "qty": int(qty),
-                            "note": note,
-                            "ro": ro_clean,
-                        }
-                        st.rerun()
-                    else:
-                        ok, msg = checkout_tool(
-                            data,
-                            pick,
-                            tech_name,
-                            qty=int(qty),
-                            note=note,
-                            ro_number=ro_clean,
-                        )
-                        if ok:
-                            _persist(data)
-                            st.success(msg)
-                            st.rerun()
-                        else:
-                            st.error(msg)
-        elif find.strip():
-            st.info("No available tools match that search.")
-
-    with right:
-        st.markdown("##### Check in a tool")
-        checkouts = list(data.get("active_checkouts") or [])
-        if not checkouts:
-            st.info("Nothing is checked out right now.")
-        else:
-            checkouts_sorted = sorted(
-                checkouts, key=lambda c: c.get("checked_out_at") or "", reverse=True
-            )
-            labels = {
-                c["id"]: (
-                    f"{c.get('tool_no')} — {c.get('tech_name')}"
-                    + (f" ×{c.get('qty')}" if int(c.get("qty") or 1) > 1 else "")
-                    + f"  (out {_fmt_when(c.get('checked_out_at', ''))})"
-                )
-                for c in checkouts_sorted
-            }
-            pick = st.selectbox(
-                "Open checkout",
-                options=list(labels.keys()),
-                format_func=lambda i: labels[i],
-                key="ci_pick",
-            )
-            note = st.text_input("Check-in note (optional)", key="ci_note")
-            if st.button("Check in", type="primary", use_container_width=True, key="ci_btn"):
-                ok, msg = checkin_checkout(data, pick, note=note)
-                if ok:
-                    _persist(data)
-                    st.success(msg)
+        b1, b2 = st.columns(2)
+        with b1:
+            ro = st.text_input("RO #", key="co_ro", placeholder="Required")
+        with b2:
+            note = st.text_input("Note (optional)", key="co_note")
+        if st.button("Check out", type="primary", use_container_width=True, key="co_btn"):
+            tech_name = str(tech or "").strip()
+            ro_clean = str(ro or "").strip()
+            if not tech_name:
+                st.error("Select a technician.")
+            elif not ro_clean:
+                st.error("Enter an RO number.")
+            else:
+                already_out = checkouts_for_technician(data, tech_name)
+                if already_out:
+                    st.session_state.co_pending = {
+                        "tool_id": pick,
+                        "tech": tech_name,
+                        "qty": int(qty),
+                        "note": note,
+                        "ro": ro_clean,
+                    }
                     st.rerun()
                 else:
-                    st.error(msg)
+                    ok, msg = checkout_tool(
+                        data,
+                        pick,
+                        tech_name,
+                        qty=int(qty),
+                        note=note,
+                        ro_number=ro_clean,
+                    )
+                    if ok:
+                        _persist(data)
+                        st.success(msg)
+                        st.rerun()
+                    else:
+                        st.error(msg)
+    elif find.strip():
+        st.info("No available tools match that search.")
+
+elif page == "Check In":
+    st.markdown("##### Check in a tool")
+    checkouts = list(data.get("active_checkouts") or [])
+    if not checkouts:
+        st.info("Nothing is checked out right now.")
+    else:
+        checkouts_sorted = sorted(
+            checkouts, key=lambda c: c.get("checked_out_at") or "", reverse=True
+        )
+        labels = {
+            c["id"]: (
+                f"{c.get('tool_no')} — {c.get('tech_name')}"
+                + (f" ×{c.get('qty')}" if int(c.get("qty") or 1) > 1 else "")
+                + f"  (out {_fmt_when(c.get('checked_out_at', ''))})"
+            )
+            for c in checkouts_sorted
+        }
+        pick = st.selectbox(
+            "Open checkout",
+            options=list(labels.keys()),
+            format_func=lambda i: labels[i],
+            key="ci_pick",
+        )
+        note = st.text_input("Check-in note (optional)", key="ci_note")
+        if st.button("Check in", type="primary", use_container_width=True, key="ci_btn"):
+            ok, msg = checkin_checkout(data, pick, note=note)
+            if ok:
+                _persist(data)
+                st.success(msg)
+                st.rerun()
+            else:
+                st.error(msg)
 
 elif page == "Out Now":
     checkouts = list(data.get("active_checkouts") or [])
@@ -1749,7 +1750,7 @@ elif page == "Reports":
                     unsafe_allow_html=True,
                 )
                 st.caption(
-                    "Use Check Out / In to sign tools out. Then this report (and the PDF) will show "
+                    "Use Check Out to sign tools out. Then this report (and the PDF) will show "
                     "each technician, signed-out time, and how long each tool has been out."
                 )
                 _pdf_download(
