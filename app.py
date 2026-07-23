@@ -851,24 +851,31 @@ elif page == "Catalog":
             if existing_acct in ACCOUNTABILITY_OPTIONS:
                 default_acct = existing_acct
 
+        loc_key = f"assign_loc_value_{assign_id}"
+        acct_key = f"assign_acct_status_{assign_id}"
+        if loc_key not in st.session_state:
+            st.session_state[loc_key] = str(
+                (selected_assign or {}).get("location") or ""
+            ).upper()
+        if acct_key not in st.session_state:
+            st.session_state[acct_key] = default_acct
+
         a1, a2 = st.columns([1.4, 1.6])
         with a1:
             assign_loc = st.text_input(
                 "Special location / assignment",
                 placeholder="E.G. SHELF D / WALL 14 (OPTIONAL IF UNACCOUNTED)",
-                key="assign_loc_value",
+                key=loc_key,
                 on_change=_force_upper,
-                args=("assign_loc_value",),
+                args=(loc_key,),
             )
         with a2:
-            if "assign_acct_status" not in st.session_state:
-                st.session_state.assign_acct_status = default_acct
             assign_acct = st.radio(
                 "This tool is",
                 options=list(ACCOUNTABILITY_OPTIONS),
                 format_func=lambda s: ACCOUNTABILITY_LABELS[s],
                 horizontal=True,
-                key="assign_acct_status",
+                key=acct_key,
             )
             st.caption(
                 "Located = found in room · Signed out = with a tech · Unaccounted for = missing"
@@ -898,14 +905,14 @@ elif page == "Catalog":
                 )
                 if ok:
                     _persist(data)
-                    st.session_state.pop("assign_loc_value", None)
-                    st.session_state.pop("assign_acct_status", None)
+                    st.session_state.pop(loc_key, None)
+                    st.session_state.pop(acct_key, None)
                     if assign_acct == ACCOUNTABILITY_UNACCOUNTED:
-                        st.success(f"{msg} — moved to Unaccounted list.")
+                        _set_flash(f"{msg} — moved to Unaccounted list.")
                     elif assign_acct == ACCOUNTABILITY_SIGNED_OUT:
-                        st.success(f"{msg} — marked Signed out.")
+                        _set_flash(f"{msg} — marked Signed out.")
                     else:
-                        st.success(f"{msg} — moved to With location list.")
+                        _set_flash(f"{msg} — location saved.")
                     st.rerun()
                 else:
                     st.error(msg)
@@ -938,10 +945,23 @@ elif page == "Catalog":
             st.caption(f"Showing first 400 of {len(matches)}. Narrow your search.")
 
         if is_admin() and not only_without_loc and not only_unaccounted:
+            _show_flash()
             st.markdown("---")
-            st.markdown("##### Edit location / assignment")
+            st.markdown("##### Edit / adjust location")
+            st.caption(
+                "Search or filter above, pick a tool, change its location, then save. "
+                "You can also update description, quantity, notes, and status."
+            )
             edit_options = {
-                t["id"]: f"{t.get('tool_no')} — {t.get('description')}" for t in matches[:200]
+                t["id"]: (
+                    f"{t.get('tool_no')} — {t.get('description')}"
+                    + (
+                        f"  [{t.get('location')}]"
+                        if t.get("location")
+                        else "  [(no location)]"
+                    )
+                )
+                for t in matches[:400]
             }
             edit_id = st.selectbox(
                 "Tool to edit",
@@ -951,59 +971,108 @@ elif page == "Catalog":
             )
             tool = next((t for t in matches if t["id"] == edit_id), None)
             if tool:
+                # Key fields by tool id so switching tools loads the correct location
+                loc_key = f"edit_loc_{edit_id}"
+                qty_key = f"edit_qty_{edit_id}"
+                acct_key = f"edit_acct_{edit_id}"
+                desc_key = f"edit_desc_{edit_id}"
+                notes_key = f"edit_notes_{edit_id}"
+                status_key = f"edit_status_{edit_id}"
+                pick_key = f"edit_loc_pick_{edit_id}"
+
+                if loc_key not in st.session_state:
+                    st.session_state[loc_key] = str(tool.get("location") or "").upper()
+                if qty_key not in st.session_state:
+                    st.session_state[qty_key] = max(1, int(tool.get("quantity") or 1))
+                if desc_key not in st.session_state:
+                    st.session_state[desc_key] = str(tool.get("description") or "").upper()
+                if notes_key not in st.session_state:
+                    st.session_state[notes_key] = str(tool.get("notes") or "").upper()
+                if status_key not in st.session_state:
+                    st.session_state[status_key] = (
+                        tool.get("status")
+                        if tool.get("status") in ("active", "non_current")
+                        else "active"
+                    )
+                if acct_key not in st.session_state:
+                    existing_acct = normalize_accountability(tool.get("accountability"))
+                    st.session_state[acct_key] = (
+                        existing_acct
+                        if existing_acct in ACCOUNTABILITY_OPTIONS
+                        else ""
+                    )
+                if pick_key not in st.session_state:
+                    st.session_state[pick_key] = "(keep / type below)"
+
+                known_locs = ["(keep / type below)"] + unique_locations(data)
+                current_loc = str(tool.get("location") or "").strip()
+                st.caption(
+                    f"Current location: **{current_loc or '(none)'}**"
+                )
+
+                pick = st.selectbox(
+                    "Copy an existing location",
+                    options=known_locs,
+                    key=pick_key,
+                    help="Pick a wall/shelf already in use, or type a new location below.",
+                )
+                prev_pick_key = f"_prev_{pick_key}"
+                prev_pick = st.session_state.get(prev_pick_key)
+                if (
+                    pick
+                    and pick != "(keep / type below)"
+                    and pick != prev_pick
+                ):
+                    st.session_state[loc_key] = str(pick).upper()
+                st.session_state[prev_pick_key] = pick
+
+                new_loc = st.text_input(
+                    "Special location / assignment",
+                    key=loc_key,
+                    placeholder="E.G. WALL 9 / SHELF D",
+                    on_change=_force_upper,
+                    args=(loc_key,),
+                )
+
                 e1, e2 = st.columns(2)
                 with e1:
-                    new_loc = st.text_input(
-                        "Special location / assignment",
-                        value=str(tool.get("location", "") or "").upper(),
-                        key="edit_loc",
-                        on_change=_force_upper,
-                        args=("edit_loc",),
-                    )
                     new_qty = st.number_input(
                         "Quantity on hand",
                         min_value=1,
-                        value=max(1, int(tool.get("quantity") or 1)),
-                        key="edit_qty",
+                        key=qty_key,
                     )
                     new_acct = st.selectbox(
                         "Accountability",
                         options=[""] + list(ACCOUNTABILITY_OPTIONS),
-                        index=(
-                            (list(ACCOUNTABILITY_OPTIONS).index(
-                                normalize_accountability(tool.get("accountability"))
-                            )
-                            + 1)
-                            if normalize_accountability(tool.get("accountability"))
-                            in ACCOUNTABILITY_OPTIONS
-                            else 0
-                        ),
                         format_func=lambda s: ACCOUNTABILITY_LABELS.get(s, "(not set)"),
-                        key="edit_acct",
+                        key=acct_key,
                     )
                 with e2:
                     new_desc = st.text_input(
                         "Description",
-                        value=str(tool.get("description", "") or "").upper(),
-                        key="edit_desc",
+                        key=desc_key,
                         on_change=_force_upper,
-                        args=("edit_desc",),
+                        args=(desc_key,),
                     )
                     new_notes = st.text_input(
                         "Notes",
-                        value=str(tool.get("notes", "") or "").upper(),
-                        key="edit_notes",
+                        key=notes_key,
                         on_change=_force_upper,
-                        args=("edit_notes",),
+                        args=(notes_key,),
                     )
                     new_status = st.selectbox(
                         "Catalog status",
                         options=["active", "non_current"],
-                        index=0 if tool.get("status") == "active" else 1,
                         format_func=lambda s: "Active" if s == "active" else "Non-current",
-                        key="edit_status",
+                        key=status_key,
                     )
-                if st.button("Save tool changes", use_container_width=True, key="edit_save"):
+
+                if st.button(
+                    "Save location & tool changes",
+                    type="primary",
+                    use_container_width=True,
+                    key="edit_save",
+                ):
                     ok, msg = update_tool(
                         data,
                         edit_id,
@@ -1012,14 +1081,30 @@ elif page == "Catalog":
                         location=new_loc,
                         notes=new_notes,
                         status=new_status,
-                        accountability=new_acct,
+                        accountability=new_acct or None,
                     )
                     if ok:
                         _persist(data)
-                        st.success(msg)
+                        for key in (
+                            loc_key,
+                            qty_key,
+                            acct_key,
+                            desc_key,
+                            notes_key,
+                            status_key,
+                            pick_key,
+                            f"_prev_{pick_key}",
+                        ):
+                            st.session_state.pop(key, None)
+                        clean = str(new_loc or "").strip()
+                        _set_flash(
+                            f"{msg} Location set to {clean or '(none)'}."
+                        )
                         st.rerun()
                     else:
                         st.error(msg)
+        elif not only_without_loc and not only_unaccounted:
+            st.caption("Sign in as Manager or Admin to edit tool locations.")
     else:
         if only_without_loc:
             st.markdown(
