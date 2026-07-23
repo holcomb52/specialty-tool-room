@@ -218,15 +218,20 @@ def _fmt_when(iso: str) -> str:
 
 
 def _get_data():
-    if "specialty_tools_data" not in st.session_state:
-        st.session_state.specialty_tools_data = load_inventory()
-    return st.session_state.specialty_tools_data
+    """Always reload from Supabase so shop PCs and the phone stay aligned.
+
+    Streamlit used to keep a session copy forever, which caused the computer
+    and phone to disagree (and overwrite each other on save).
+    """
+    data = load_inventory()
+    st.session_state.specialty_tools_data = data
+    return data
 
 
 def _persist(data) -> None:
     st.session_state.specialty_tools_data = data
-    ok, err = save_inventory(data)
-    if not ok and err:
+    _ok, err = save_inventory(data)
+    if err:
         st.session_state["_sync_error"] = err
     else:
         st.session_state.pop("_sync_error", None)
