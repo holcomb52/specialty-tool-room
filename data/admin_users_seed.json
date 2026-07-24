@@ -1,0 +1,46 @@
+{
+  "users": [
+    {
+      "id": "eb38d4bf-c0f0-4bd2-8a6d-3ca299b5e91b",
+      "name": "Administrator",
+      "username": "admin",
+      "password_hash": "pbkdf2_sha256$86eec64bd321988b29d32876bbd47d5d$2657709e6fcd01b3b1229863c8b01e92b3991b7cffd226d1d2f4bdf9aa85dee0",
+      "created_at": "2026-07-24T13:30:35.717773+00:00"
+    },
+    {
+      "id": "777213c7-1c1e-48fd-9a60-e9e23779cad9",
+      "name": "Christa Coleman",
+      "username": "christa",
+      "password_hash": "pbkdf2_sha256$eaeaddb430e7d3e94ff080591d3f91df$4bedf2b3d8a33509c477c174f48b1a544792a5c22a1ba44f3508a588b3f84302",
+      "created_at": "2026-07-24T13:30:35.756312+00:00"
+    },
+    {
+      "id": "13dde154-8625-45c8-a656-4dfe0d314014",
+      "name": "Jennifer Traum",
+      "username": "jennifer",
+      "password_hash": "pbkdf2_sha256$216c1d4eff1d55c6cc23d56a8eb612cb$6a51c12c9b41fadd1aec3e83041df29081a4a41bf8b91f27787abee98de4d56a",
+      "created_at": "2026-07-24T13:30:35.805261+00:00"
+    },
+    {
+      "id": "7744de4e-ee0e-43c4-9dd3-5ca6f98991b3",
+      "name": "Kaitlyn Long",
+      "username": "kaitlyn",
+      "password_hash": "pbkdf2_sha256$a47ad55ae72b9a514d1be46624bcc00e$ea5d64f16f82d93efd775d857d50524493df825345d7a6022f10bb372465773c",
+      "created_at": "2026-07-24T13:30:35.859063+00:00"
+    },
+    {
+      "id": "7da26412-28e7-40dc-8d6e-4fb03ba5eb3f",
+      "name": "McKenna Griffin",
+      "username": "mckenna",
+      "password_hash": "pbkdf2_sha256$c4aee01bd474127a7e2081b75ee0ea81$126de9c8e150e50cc9f84bf86c812c163888805583d9908b4d62313476a59614",
+      "created_at": "2026-07-24T13:30:35.896563+00:00"
+    },
+    {
+      "id": "28b11848-a740-42c1-9841-1c7bc21f7af4",
+      "name": "Misty Carver",
+      "username": "misty",
+      "password_hash": "pbkdf2_sha256$33290b453bd90835f4a7fe15aa1e40db$458fcd1cbbb4adb67d2067d26423536a36747e8ee17f525c1a738b96f0a7da3a",
+      "created_at": "2026-07-24T13:30:35.944732+00:00"
+    }
+  ]
+}

@@ -18,7 +18,12 @@ from lib.app_auth import (
     pages_for_role,
     require_login,
 )
-from lib.admin_users import add_admin_user, load_admin_users, remove_admin_user
+from lib.admin_users import (
+    add_admin_user,
+    load_admin_users,
+    remove_admin_user,
+    reset_admin_password,
+)
 from lib.specialty_tools_import import parse_tool_inventory_file
 from lib.specialty_tools_storage import (
     ACCOUNTABILITY_LABELS,
@@ -1294,6 +1299,38 @@ elif page == "Admin users":
             use_container_width=True,
             hide_index=True,
         )
+
+        st.markdown("##### Reset admin password")
+        reset_opts = {
+            u["username"]: f"{u.get('name')} ({u.get('username')})" for u in admins
+        }
+        reset_user = st.selectbox(
+            "Admin to reset",
+            options=list(reset_opts.keys()),
+            format_func=lambda u: reset_opts[u],
+            key="admin_reset_user",
+        )
+        r1, r2 = st.columns(2)
+        with r1:
+            reset_pw = st.text_input(
+                "New password", type="password", key="admin_reset_pw"
+            )
+        with r2:
+            reset_pw2 = st.text_input(
+                "Confirm new password", type="password", key="admin_reset_pw2"
+            )
+        if st.button("Reset password", type="primary", key="admin_reset_btn"):
+            if reset_pw != reset_pw2:
+                st.error("Passwords do not match.")
+            else:
+                ok, msg, updated = reset_admin_password(admins, reset_user, reset_pw)
+                if ok:
+                    st.success(msg)
+                    st.rerun()
+                else:
+                    st.error(msg)
+
+        st.markdown("---")
         remove_opts = {
             u["username"]: f"{u.get('name')} ({u.get('username')})" for u in admins
         }

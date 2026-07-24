@@ -15,6 +15,7 @@ TABLE = "specialty_tools_store"
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 ADMIN_PATH = DATA_DIR / "admin_users.json"
+SEED_PATH = DATA_DIR / "admin_users_seed.json"
 
 _HASH_ROUNDS = 120_000
 
@@ -147,11 +148,32 @@ def _save_remote(users: List[Dict[str, Any]]) -> Tuple[bool, str]:
         return False, str(exc)
 
 
+def _load_seed() -> List[Dict[str, Any]]:
+    if not SEED_PATH.exists():
+        return []
+    try:
+        data = json.loads(SEED_PATH.read_text())
+        return _normalize_users(data.get("users") if isinstance(data, dict) else data)
+    except (json.JSONDecodeError, OSError, TypeError):
+        return []
+
+
 def load_admin_users() -> List[Dict[str, Any]]:
     remote = _load_remote()
     if remote is not None:
-        return remote
-    return _load_local()
+        # Non-empty remote wins. Empty remote still falls through so a seed
+        # can bootstrap Streamlit Cloud when Supabase has no admin row yet.
+        if remote:
+            return remote
+    local = _load_local()
+    if local:
+        return local
+    seed = _load_seed()
+    if seed:
+        # Materialize seed into live local store (and Supabase when configured).
+        save_admin_users(seed)
+        return seed
+    return []
 
 
 def save_admin_users(users: List[Dict[str, Any]]) -> Tuple[bool, str]:
@@ -241,6 +263,32 @@ def remove_admin_user(
     if not ok:
         return False, err or "Could not save.", users
     return True, f"Removed admin '{needle}'.", updated
+
+
+def reset_admin_password(
+    users: List[Dict[str, Any]], username: str, password: str
+) -> Tuple[bool, str, List[Dict[str, Any]]]:
+    needle = str(username or "").strip().lower()
+    clean_pw = str(password or "")
+    if not needle:
+        return False, "Select an admin.", users
+    if len(clean_pw) < 6:
+        return False, "Password must be at least 6 characters.", users
+    updated = []
+    found = False
+    for user in users:
+        item = dict(user)
+        if item.get("username") == needle:
+            item["password_hash"] = hash_password(clean_pw)
+            found = True
+        updated.append(item)
+    if not found:
+        return False, "Admin not found.", users
+    cleaned = _normalize_users(updated)
+    ok, err = save_admin_users(cleaned)
+    if not ok:
+        return False, err or "Could not save.", users
+    return True, f"Password updated for '{needle}'.", cleaned
 
 
 def ensure_bootstrap_admin(app_password: str) -> None:
