@@ -457,3 +457,138 @@ def build_inventory_report_pdf(
 
     doc.build(story, onFirstPage=_footer, onLaterPages=_footer)
     return buffer.getvalue()
+
+
+def build_labor_rate_grid_pdf(
+    *,
+    title: str,
+    subtitle: str = "",
+    grid_rows: List[Dict[str, Any]],
+    summary: Optional[Sequence[tuple[str, str]]] = None,
+    strong_lo: float = 0.0,
+    strong_hi: float = 0.0,
+    generated_at: Optional[datetime] = None,
+) -> bytes:
+    """Printable customer-pay labor grid for warranty rate submissions."""
+    styles = _styles()
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=letter,
+        leftMargin=0.5 * inch,
+        rightMargin=0.5 * inch,
+        topMargin=0.55 * inch,
+        bottomMargin=0.65 * inch,
+        title=title,
+        author="Specialty Tool Room",
+    )
+
+    when = (generated_at or datetime.now()).astimezone()
+    stamp = when.strftime("%m/%d/%Y %I:%M %p")
+
+    story: List[Any] = [
+        Paragraph("NEW SMYRNA BEACH CHRYSLER", styles["brand"]),
+        Paragraph("Specialty Tool Room", styles["title"]),
+        Paragraph(title, styles["subtitle"]),
+    ]
+    if subtitle:
+        story.append(Paragraph(subtitle, styles["subtitle"]))
+    story.append(Paragraph(f"Generated {stamp}", styles["meta"]))
+    story.append(Spacer(1, 0.12 * inch))
+
+    if summary:
+        story.append(_summary_table(summary, styles))
+        story.append(Spacer(1, 0.18 * inch))
+
+    story.append(
+        Paragraph(
+            f"Customer-pay labor grid · strong band {strong_lo:.1f}–{strong_hi:.1f} hrs",
+            styles["section"],
+        )
+    )
+
+    header = [
+        _p("HOUR", styles["cell_bold"]),
+        _p("+.0", styles["cell_bold"]),
+        _p("+.1", styles["cell_bold"]),
+        _p("+.2", styles["cell_bold"]),
+        _p("+.3", styles["cell_bold"]),
+        _p("+.4", styles["cell_bold"]),
+    ]
+    data = [header]
+    strong_row_indexes: List[int] = []
+    for idx, row in enumerate(grid_rows, start=1):
+        data.append(
+            [
+                _p(row.get("HOUR", ""), styles["cell_bold"]),
+                _p(row.get("+.0", "") or "—", styles["cell"]),
+                _p(row.get("+.1", "") or "—", styles["cell"]),
+                _p(row.get("+.2", "") or "—", styles["cell"]),
+                _p(row.get("+.3", "") or "—", styles["cell"]),
+                _p(row.get("+.4", "") or "—", styles["cell"]),
+            ]
+        )
+        if row.get("_strong"):
+            strong_row_indexes.append(idx)
+
+    col_widths = [
+        0.75 * inch,
+        1.15 * inch,
+        1.15 * inch,
+        1.15 * inch,
+        1.15 * inch,
+        1.15 * inch,
+    ]
+    table = Table(data, colWidths=col_widths, repeatRows=1)
+    style_cmds = [
+        ("BACKGROUND", (0, 0), (-1, 0), _HEADER_BG),
+        ("TEXTCOLOR", (0, 0), (-1, 0), _HEADER_FG),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, 0), 8),
+        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("GRID", (0, 0), (-1, -1), 0.35, _LINE),
+        ("LEFTPADDING", (0, 0), (-1, -1), 4),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+        ("TOPPADDING", (0, 0), (-1, -1), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ("BOX", (0, 0), (-1, -1), 0.8, _INK),
+        ("BACKGROUND", (0, 1), (0, -1), _FOCUS),
+    ]
+    for i in range(1, len(data)):
+        if i % 2 == 0:
+            style_cmds.append(("BACKGROUND", (1, i), (-1, i), _ROW_ALT))
+    for i in strong_row_indexes:
+        style_cmds.append(("BACKGROUND", (0, i), (-1, i), _SUMMARY_BG))
+    table.setStyle(TableStyle(style_cmds))
+    story.append(table)
+    story.append(Spacer(1, 0.12 * inch))
+    story.append(
+        Paragraph(
+            "Highlighted rows intersect the hour range where most of your work falls. "
+            "Use this customer-pay schedule to support a Stellantis warranty labor rate request.",
+            styles["hint"],
+        )
+    )
+
+    def _footer(canvas, _doc) -> None:
+        canvas.saveState()
+        canvas.setStrokeColor(_LINE)
+        canvas.setLineWidth(0.5)
+        canvas.line(0.5 * inch, 0.45 * inch, letter[0] - 0.5 * inch, 0.45 * inch)
+        canvas.setFont("Helvetica", 8)
+        canvas.setFillColor(_MUTED)
+        canvas.drawString(
+            0.5 * inch,
+            0.28 * inch,
+            "Specialty Tool Room · Confidential shop use",
+        )
+        canvas.drawRightString(
+            letter[0] - 0.5 * inch,
+            0.28 * inch,
+            f"Page {_doc.page}",
+        )
+        canvas.restoreState()
+
+    doc.build(story, onFirstPage=_footer, onLaterPages=_footer)
+    return buffer.getvalue()
