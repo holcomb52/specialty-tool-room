@@ -1253,6 +1253,16 @@ elif page == "Admin users":
         "Only Managers can add or remove Admin accounts. Admins have full tool-room access "
         "(add tools, technicians, import) but cannot manage other admins."
     )
+    if not is_configured():
+        st.markdown(
+            status_banner(
+                "Database is LOCAL — admin users are stored only on this server and "
+                "will disappear when Streamlit Cloud redeploys. Add real Supabase "
+                "secrets so admin accounts persist.",
+                "warn",
+            ),
+            unsafe_allow_html=True,
+        )
     admins = load_admin_users()
     a1, a2 = st.columns(2)
     with a1:

@@ -158,16 +158,39 @@ def _load_seed() -> List[Dict[str, Any]]:
         return []
 
 
+def _merge_missing_seed_users(
+    users: List[Dict[str, Any]],
+) -> Tuple[List[Dict[str, Any]], bool]:
+    """Add any seed accounts that are missing. Never overwrite existing passwords."""
+    seed = _load_seed()
+    if not seed:
+        return _normalize_users(users), False
+    by_username = {u["username"]: dict(u) for u in _normalize_users(users)}
+    changed = False
+    for seeded in seed:
+        username = seeded.get("username")
+        if not username or username in by_username:
+            continue
+        by_username[username] = dict(seeded)
+        changed = True
+    return _normalize_users(list(by_username.values())), changed
+
+
 def load_admin_users() -> List[Dict[str, Any]]:
     remote = _load_remote()
-    if remote is not None:
-        # Non-empty remote wins. Empty remote still falls through so a seed
-        # can bootstrap Streamlit Cloud when Supabase has no admin row yet.
-        if remote:
-            return remote
+    if remote is not None and remote:
+        merged, changed = _merge_missing_seed_users(remote)
+        if changed:
+            save_admin_users(merged)
+        return merged
+
     local = _load_local()
     if local:
-        return local
+        merged, changed = _merge_missing_seed_users(local)
+        if changed:
+            save_admin_users(merged)
+        return merged
+
     seed = _load_seed()
     if seed:
         # Materialize seed into live local store (and Supabase when configured).
@@ -179,9 +202,14 @@ def load_admin_users() -> List[Dict[str, Any]]:
 def save_admin_users(users: List[Dict[str, Any]]) -> Tuple[bool, str]:
     cleaned = _normalize_users(users)
     _save_local(cleaned)
+    from lib.supabase_client import get_supabase
+
+    if not get_supabase():
+        # Local/ephemeral only — Streamlit Cloud will lose these on redeploy.
+        return True, ""
     ok, err = _save_remote(cleaned)
     if not ok:
-        return True, err or ""
+        return False, err or "Could not save admin users to the cloud database."
     return True, ""
 
 
