@@ -57,6 +57,8 @@ from lib.specialty_tools_storage import (
     save_inventory,
     search_tools,
     technicians_with_open_checkouts,
+    tool_replacement_cost,
+    unaccounted_replacement_totals,
     unique_locations,
     update_checkout,
     update_tool,
@@ -891,6 +893,21 @@ elif page == "Catalog":
                 "Located = found in room · Signed out = with a tech · Unaccounted for = missing"
             )
 
+        show_cost = only_unaccounted or assign_acct == ACCOUNTABILITY_UNACCOUNTED
+        if show_cost:
+            cost_key = f"assign_repl_cost_{assign_id}"
+            existing_cost = tool_replacement_cost(selected_assign)
+            if cost_key not in st.session_state:
+                st.session_state[cost_key] = (
+                    f"{existing_cost:.2f}" if existing_cost is not None else ""
+                )
+            st.text_input(
+                "Replacement cost ($) — optional",
+                placeholder="Leave blank until you order the replacement",
+                key=cost_key,
+                help="Optional. Enter the price when you know what it will cost to replace this tool.",
+            )
+
         if currently_out and assign_acct != ACCOUNTABILITY_SIGNED_OUT:
             st.caption("Note: this tool currently has an open checkout.")
 
@@ -907,16 +924,21 @@ elif page == "Catalog":
             if assign_acct != ACCOUNTABILITY_UNACCOUNTED and not clean_loc:
                 st.error("Enter a location, or mark the tool Unaccounted for.")
             else:
-                ok, msg = update_tool(
-                    data,
-                    assign_id,
-                    location=clean_loc,
-                    accountability=assign_acct,
-                )
+                kwargs = {
+                    "location": clean_loc,
+                    "accountability": assign_acct,
+                }
+                if show_cost:
+                    kwargs["replacement_cost"] = st.session_state.get(
+                        f"assign_repl_cost_{assign_id}", ""
+                    )
+                    kwargs["set_replacement_cost"] = True
+                ok, msg = update_tool(data, assign_id, **kwargs)
                 if ok:
                     _persist(data)
                     st.session_state.pop(loc_key, None)
                     st.session_state.pop(acct_key, None)
+                    st.session_state.pop(f"assign_repl_cost_{assign_id}", None)
                     if assign_acct == ACCOUNTABILITY_UNACCOUNTED:
                         _set_flash(f"{msg} — moved to Unaccounted list.")
                     elif assign_acct == ACCOUNTABILITY_SIGNED_OUT:
@@ -943,6 +965,13 @@ elif page == "Catalog":
                     "Description": t.get("description", ""),
                     "Location": t.get("location", "") or "(none)",
                     "Accountability": ACCOUNTABILITY_LABELS.get(acct, "—"),
+                    "Replace $": (
+                        f"${tool_replacement_cost(t):,.2f}"
+                        if tool_replacement_cost(t) is not None
+                        else "—"
+                    )
+                    if only_unaccounted
+                    else None,
                     "Qty": t.get("quantity", 1),
                     "Avail": avail,
                     "Out": out,
@@ -950,6 +979,10 @@ elif page == "Catalog":
                     "Notes": t.get("notes", ""),
                 }
             )
+        # Drop empty Replace column when not on unaccounted filter
+        if not only_unaccounted:
+            for row in rows:
+                row.pop("Replace $", None)
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
         if len(matches) > 400:
             st.caption(f"Showing first 400 of {len(matches)}. Narrow your search.")
@@ -1128,6 +1161,131 @@ elif page == "Catalog":
             )
         else:
             st.info("No tools match those filters.")
+
+elif page == "Replacement Costs":
+    st.markdown("##### Unaccounted tools — replacement spend")
+    st.caption(
+        "Running total of what it will cost to replace tools currently marked Unaccounted. "
+        "Costs are optional until you order the part."
+    )
+    summary = unaccounted_replacement_totals(data)
+    rows = summary["rows"]
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.markdown(
+            stat_card("Unaccounted", str(summary["tool_count"]), "orange", "❓"),
+            unsafe_allow_html=True,
+        )
+    with c2:
+        st.markdown(
+            stat_card("With price", str(summary["priced_count"]), "amber", "$"),
+            unsafe_allow_html=True,
+        )
+    with c3:
+        st.markdown(
+            stat_card("Need price", str(summary["unpriced_count"]), "stone", "—"),
+            unsafe_allow_html=True,
+        )
+    with c4:
+        st.markdown(
+            stat_card(
+                "Running total",
+                f"${summary['total_cost']:,.2f}",
+                "green",
+                "∑",
+            ),
+            unsafe_allow_html=True,
+        )
+
+    if not rows:
+        st.markdown(
+            status_banner("No unaccounted tools right now — nothing to replace.", "success"),
+            unsafe_allow_html=True,
+        )
+    else:
+        table_rows = [
+            {
+                "Tool #": r.get("tool_no", ""),
+                "Description": r.get("description", ""),
+                "Qty": r.get("qty", 1),
+                "Replace $": (
+                    f"${float(r['replacement_cost']):,.2f}"
+                    if r.get("replacement_cost") is not None
+                    else "(not priced yet)"
+                ),
+                "Line total": (
+                    f"${float(r['replacement_cost']) * int(r.get('qty') or 1):,.2f}"
+                    if r.get("replacement_cost") is not None
+                    else "—"
+                ),
+                "Notes": r.get("notes", ""),
+            }
+            for r in rows
+        ]
+        st.dataframe(pd.DataFrame(table_rows), use_container_width=True, hide_index=True)
+        st.markdown(
+            f"**Running total to replace priced tools: "
+            f"${summary['total_cost']:,.2f}**"
+            + (
+                f"  ·  {summary['unpriced_count']} still need a price"
+                if summary["unpriced_count"]
+                else ""
+            )
+        )
+
+        if is_admin():
+            st.markdown("---")
+            st.markdown("##### Enter / update a replacement cost")
+            cost_opts = {
+                r["id"]: (
+                    f"{r.get('tool_no')} — {r.get('description')}"
+                    + (
+                        f"  (${float(r['replacement_cost']):,.2f})"
+                        if r.get("replacement_cost") is not None
+                        else "  (no price yet)"
+                    )
+                )
+                for r in rows
+            }
+            cost_id = st.selectbox(
+                "Unaccounted tool",
+                options=list(cost_opts.keys()),
+                format_func=lambda i: cost_opts[i],
+                key="repl_cost_tool",
+            )
+            selected_row = next((r for r in rows if r["id"] == cost_id), None)
+            cost_field = f"repl_cost_value_{cost_id}"
+            if cost_field not in st.session_state:
+                existing = (selected_row or {}).get("replacement_cost")
+                st.session_state[cost_field] = (
+                    f"{float(existing):.2f}" if existing is not None else ""
+                )
+            st.text_input(
+                "Replacement cost ($)",
+                placeholder="Optional — leave blank until you order",
+                key=cost_field,
+            )
+            if st.button(
+                "Save replacement cost",
+                type="primary",
+                use_container_width=True,
+                key="repl_cost_save",
+            ):
+                ok, msg = update_tool(
+                    data,
+                    cost_id,
+                    replacement_cost=st.session_state.get(cost_field, ""),
+                    set_replacement_cost=True,
+                )
+                if ok:
+                    _persist(data)
+                    st.session_state.pop(cost_field, None)
+                    st.success(msg)
+                    st.rerun()
+                else:
+                    st.error(msg)
+        else:
+            st.caption("Sign in as Manager or Admin to enter replacement costs.")
 
 elif page == "Add Tool":
     if not is_admin():

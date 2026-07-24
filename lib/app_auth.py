@@ -18,6 +18,7 @@ MANAGER_PAGES = [
     "Check In",
     "Out Now",
     "Catalog",
+    "Replacement Costs",
     "Reports",
     "Add Tool",
     "Technicians",
@@ -32,6 +33,7 @@ ADMIN_PAGES = [
     "Check In",
     "Out Now",
     "Catalog",
+    "Replacement Costs",
     "Reports",
     "Add Tool",
     "Technicians",
@@ -44,6 +46,7 @@ TECH_PAGES = [
     "Check In",
     "Out Now",
     "Catalog",
+    "Replacement Costs",
     "Reports",
     "History",
 ]

@@ -636,6 +636,8 @@ def update_tool(
     notes: Optional[str] = None,
     status: Optional[str] = None,
     accountability: Optional[str] = None,
+    replacement_cost: Any = None,
+    set_replacement_cost: bool = False,
 ) -> Tuple[bool, str]:
     tool = find_tool(data, tool_id)
     if not tool:
@@ -652,11 +654,29 @@ def update_tool(
         tool["status"] = status
     if accountability is not None:
         tool["accountability"] = normalize_accountability(accountability)
+    if set_replacement_cost:
+        raw = str(replacement_cost or "").strip().replace("$", "").replace(",", "")
+        if not raw:
+            tool["replacement_cost"] = None
+        else:
+            try:
+                cost = float(raw)
+            except (TypeError, ValueError):
+                return False, "Enter a valid replacement cost, or leave it blank."
+            if cost < 0:
+                return False, "Replacement cost cannot be negative."
+            tool["replacement_cost"] = round(cost, 2) if cost > 0 else None
     acct = normalize_accountability(tool.get("accountability"))
     loc = tool.get("location") or "(none)"
     note = f"Location set to {loc}"
     if acct:
         note += f" · {ACCOUNTABILITY_LABELS.get(acct, acct)}"
+    cost_val = tool.get("replacement_cost")
+    if cost_val is not None:
+        try:
+            note += f" · replace ${float(cost_val):,.2f}"
+        except (TypeError, ValueError):
+            pass
     _append_history(
         data,
         {
@@ -753,6 +773,8 @@ def replace_tools_from_import(
             prev_acct = normalize_accountability(prev.get("accountability"))
             if prev_acct:
                 item["accountability"] = prev_acct
+            if prev.get("replacement_cost") is not None:
+                item["replacement_cost"] = prev.get("replacement_cost")
         merged_tools.append(item)
 
     new_data = empty_inventory(source)
@@ -836,6 +858,54 @@ def inventory_stats(data: Dict[str, Any]) -> Dict[str, int]:
         "without_location": without_location,
         "unaccounted": unaccounted,
         "overdue": len(list_overdue_checkouts(data)),
+    }
+
+
+def tool_replacement_cost(tool: Dict[str, Any] | None) -> Optional[float]:
+    if not isinstance(tool, dict):
+        return None
+    raw = tool.get("replacement_cost")
+    if raw is None or raw == "":
+        return None
+    try:
+        cost = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return round(cost, 2) if cost > 0 else None
+
+
+def unaccounted_replacement_rows(data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Currently unaccounted tools with optional replacement costs for the spend total."""
+    rows: List[Dict[str, Any]] = []
+    for tool in data.get("tools") or []:
+        if normalize_accountability(tool.get("accountability")) != ACCOUNTABILITY_UNACCOUNTED:
+            continue
+        cost = tool_replacement_cost(tool)
+        rows.append(
+            {
+                "id": tool.get("id", ""),
+                "tool_no": tool.get("tool_no", ""),
+                "description": tool.get("description", ""),
+                "location": tool.get("location", ""),
+                "notes": tool.get("notes", ""),
+                "replacement_cost": cost,
+                "qty": max(1, int(tool.get("quantity") or 1)),
+            }
+        )
+    rows.sort(key=lambda r: str(r.get("tool_no") or ""))
+    return rows
+
+
+def unaccounted_replacement_totals(data: Dict[str, Any]) -> Dict[str, Any]:
+    rows = unaccounted_replacement_rows(data)
+    priced = [r for r in rows if r.get("replacement_cost") is not None]
+    total = sum(float(r["replacement_cost"]) * int(r.get("qty") or 1) for r in priced)
+    return {
+        "rows": rows,
+        "tool_count": len(rows),
+        "priced_count": len(priced),
+        "unpriced_count": len(rows) - len(priced),
+        "total_cost": round(total, 2),
     }
 
 
