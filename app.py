@@ -43,6 +43,7 @@ from lib.specialty_tools_storage import (
     checkouts_for_technician,
     clear_inventory_mark,
     days_checked_out,
+    delete_tool,
     dismiss_overdue_alert,
     find_tool,
     inventory_count_rows,
@@ -1151,6 +1152,70 @@ elif page == "Catalog":
                         st.rerun()
                     else:
                         st.error(msg)
+
+                st.markdown("---")
+                st.markdown("##### Delete tool from catalog")
+                st.caption(
+                    "Permanently removes this tool number and description from the catalog. "
+                    "Manager and Admin only."
+                )
+                confirm_key = f"delete_tool_confirm_{edit_id}"
+                force_key = f"delete_tool_force_{edit_id}"
+                open_qty = qty_out(data, edit_id)
+                if open_qty:
+                    st.warning(
+                        f"This tool has **{open_qty}** unit(s) signed out. "
+                        "Check it in first, or enable force delete below."
+                    )
+                    st.checkbox(
+                        "Force delete anyway (also clears open checkouts)",
+                        key=force_key,
+                    )
+                if st.session_state.get(confirm_key) != edit_id:
+                    if st.button(
+                        "🗑 Delete tool",
+                        use_container_width=True,
+                        key=f"delete_tool_btn_{edit_id}",
+                    ):
+                        st.session_state[confirm_key] = edit_id
+                        st.rerun()
+                else:
+                    st.error(
+                        f"Delete **{tool.get('tool_no')}** — "
+                        f"{tool.get('description')}? This cannot be undone."
+                    )
+                    yes_col, no_col = st.columns(2)
+                    with yes_col:
+                        if st.button(
+                            "Yes, delete tool",
+                            type="primary",
+                            use_container_width=True,
+                            key=f"delete_tool_yes_{edit_id}",
+                        ):
+                            ok, msg = delete_tool(
+                                data,
+                                edit_id,
+                                deleted_by=current_admin_name(),
+                                force=bool(st.session_state.get(force_key)),
+                            )
+                            st.session_state.pop(confirm_key, None)
+                            st.session_state.pop(force_key, None)
+                            if ok:
+                                _persist(data)
+                                st.session_state.pop("edit_tool_id", None)
+                                _set_flash(msg)
+                                st.rerun()
+                            else:
+                                st.error(msg)
+                    with no_col:
+                        if st.button(
+                            "Cancel",
+                            use_container_width=True,
+                            key=f"delete_tool_no_{edit_id}",
+                        ):
+                            st.session_state.pop(confirm_key, None)
+                            st.session_state.pop(force_key, None)
+                            st.rerun()
         elif not only_without_loc and not only_unaccounted:
             st.caption("Sign in as Manager or Admin to edit tool locations.")
     else:

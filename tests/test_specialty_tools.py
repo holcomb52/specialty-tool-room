@@ -9,7 +9,10 @@ from lib.specialty_tools_storage import (
     add_tool,
     checkin_checkout,
     checkout_tool,
+    delete_tool,
     dismiss_overdue_alert,
+    find_tool,
+    find_tool_by_number,
     inventory_stats,
     list_overdue_checkouts,
     qty_available,
@@ -265,3 +268,39 @@ def test_import_dedupes_and_keeps_system_location():
     assert c100["description"] == "NEW DESC"
     assert merged["_import_stats"]["duplicates_removed"] == 1
     assert merged["_import_stats"]["locations_kept"] == 1
+
+
+def test_delete_tool_removes_number_from_catalog():
+    data = {"tools": [], "active_checkouts": [], "history": [], "source": "", "version": 1}
+    ok, msg, tool = add_tool(
+        data,
+        tool_no="Z-9999",
+        description="TEMP TEST TOOL",
+        quantity=1,
+        location="BENCH",
+    )
+    assert ok, msg
+    assert find_tool_by_number(data, "Z-9999") is not None
+
+    ok, msg = delete_tool(data, tool["id"], deleted_by="Manager")
+    assert ok, msg
+    assert find_tool(data, tool["id"]) is None
+    assert find_tool_by_number(data, "Z-9999") is None
+    assert any(h.get("action") == "deleted" for h in data["history"])
+
+
+def test_delete_tool_blocked_when_signed_out_unless_forced():
+    data = _load_seed()
+    tool = next(t for t in data["tools"] if t.get("tool_no") == "C-4150A")
+    ok, msg = checkout_tool(data, tool["id"], "Dale Potts", qty=1, ro_number="RO-DEL")
+    assert ok, msg
+
+    ok, msg = delete_tool(data, tool["id"])
+    assert not ok
+    assert "signed out" in msg.lower()
+    assert find_tool(data, tool["id"]) is not None
+
+    ok, msg = delete_tool(data, tool["id"], force=True, deleted_by="Admin")
+    assert ok, msg
+    assert find_tool(data, tool["id"]) is None
+    assert all(c.get("tool_id") != tool["id"] for c in data["active_checkouts"])

@@ -626,6 +626,82 @@ def add_tool(
     return True, f"Added {clean_no}.", tool
 
 
+def delete_tool(
+    data: Dict[str, Any],
+    tool_id: str,
+    *,
+    deleted_by: str = "",
+    force: bool = False,
+) -> Tuple[bool, str]:
+    """Remove a tool and its tool number from the catalog.
+
+    Open checkouts for the tool are removed when ``force`` is True; otherwise
+    deletion is blocked until those checkouts are returned.
+    """
+    tool = find_tool(data, tool_id)
+    if not tool:
+        return False, "Tool not found."
+
+    open_checkouts = [
+        c
+        for c in data.get("active_checkouts") or []
+        if str(c.get("tool_id") or "") == str(tool_id)
+    ]
+    if open_checkouts and not force:
+        who = ", ".join(
+            sorted(
+                {
+                    str(c.get("tech_name") or "").strip()
+                    for c in open_checkouts
+                    if str(c.get("tech_name") or "").strip()
+                }
+            )
+        )
+        detail = f" currently signed out to {who}" if who else " currently signed out"
+        return (
+            False,
+            f"{tool.get('tool_no')} is{detail}. Check it in first, or confirm force delete.",
+        )
+
+    tool_no = str(tool.get("tool_no") or "")
+    description = str(tool.get("description") or "")
+    data["tools"] = [
+        item
+        for item in data.get("tools") or []
+        if str(item.get("id") or "") != str(tool_id)
+    ]
+    if open_checkouts:
+        data["active_checkouts"] = [
+            c
+            for c in data.get("active_checkouts") or []
+            if str(c.get("tool_id") or "") != str(tool_id)
+        ]
+
+    who = str(deleted_by or "").strip()
+    note = "Deleted from catalog"
+    if open_checkouts:
+        note += f" · cleared {len(open_checkouts)} open checkout(s)"
+    if who:
+        note += f" (by {who})"
+
+    _append_history(
+        data,
+        {
+            "id": str(uuid.uuid4()),
+            "action": "deleted",
+            "tool_id": tool_id,
+            "tool_no": tool_no,
+            "description": description,
+            "tech_name": who,
+            "qty": tool.get("quantity", 1),
+            "note": note,
+            "ro_number": "",
+            "at": _now_iso(),
+        },
+    )
+    return True, f"Deleted {tool_no} from the catalog."
+
+
 def update_tool(
     data: Dict[str, Any],
     tool_id: str,
