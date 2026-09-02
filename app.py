@@ -462,6 +462,15 @@ with row3[0]:
             "Catalog",
             **_catalog_card_prefs(cat_part_ordered=True),
         )
+with row3[1]:
+    order_spend = unaccounted_replacement_totals(data)
+    if st.button(
+        f"💲  Need to order\n${order_spend['total_cost']:,.2f}",
+        key="stat_need_to_order",
+        use_container_width=True,
+        help="Running total to replace Unaccounted tools (open Replacement Costs)",
+    ):
+        _goto_page("Replacement Costs")
 
 overdue = list_overdue_checkouts(data)
 if overdue:
@@ -910,6 +919,163 @@ elif page == "Catalog":
                 st.rerun()
             else:
                 st.error(msg)
+        st.markdown("---")
+    elif show_assign and only_unaccounted:
+        order_totals = unaccounted_replacement_totals(data)
+        tot1, tot2, tot3 = st.columns(3)
+        with tot1:
+            st.markdown(
+                stat_card(
+                    "Need to order",
+                    str(order_totals["tool_count"]),
+                    "orange",
+                    "❓",
+                ),
+                unsafe_allow_html=True,
+            )
+        with tot2:
+            st.markdown(
+                stat_card(
+                    "Need a price",
+                    str(order_totals["unpriced_count"]),
+                    "stone",
+                    "—",
+                ),
+                unsafe_allow_html=True,
+            )
+        with tot3:
+            st.markdown(
+                stat_card(
+                    "Running total",
+                    f"${order_totals['total_cost']:,.2f}",
+                    "green",
+                    "∑",
+                ),
+                unsafe_allow_html=True,
+            )
+        st.caption(
+            "Need to order = tools still Unaccounted. Check **Ordered** when you place the "
+            "order — it moves to the Part Ordered card. Running total uses prices you have entered."
+        )
+        st.markdown("##### Update unaccounted tool")
+        assign_options = {
+            t["id"]: f"{t.get('tool_no')} — {t.get('description')}"
+            for t in matches[:400]
+        }
+        assign_id = st.selectbox(
+            "Tool",
+            options=list(assign_options.keys()),
+            format_func=lambda i: assign_options[i],
+            key="assign_loc_tool",
+        )
+        selected_assign = next((t for t in matches if t["id"] == assign_id), None)
+        currently_out = bool(
+            selected_assign and qty_out(data, selected_assign["id"]) > 0
+        )
+        loc_key = f"assign_loc_value_{assign_id}"
+        acct_key = f"assign_acct_status_{assign_id}"
+        ordered_key = f"assign_ordered_{assign_id}"
+        if loc_key not in st.session_state:
+            st.session_state[loc_key] = str(
+                (selected_assign or {}).get("location") or ""
+            ).upper()
+        if acct_key not in st.session_state:
+            st.session_state[acct_key] = ACCOUNTABILITY_UNACCOUNTED
+        if ordered_key not in st.session_state:
+            st.session_state[ordered_key] = False
+
+        a1, a2 = st.columns([1.4, 1.6])
+        with a1:
+            assign_loc = st.text_input(
+                "Special location / assignment",
+                placeholder="E.G. SHELF D / WALL 14 (OPTIONAL IF UNACCOUNTED)",
+                key=loc_key,
+                on_change=_force_upper,
+                args=(loc_key,),
+            )
+        with a2:
+            assign_acct = st.radio(
+                "This tool is",
+                options=[
+                    ACCOUNTABILITY_LOCATED,
+                    ACCOUNTABILITY_SIGNED_OUT,
+                    ACCOUNTABILITY_UNACCOUNTED,
+                ],
+                format_func=lambda s: ACCOUNTABILITY_LABELS[s],
+                horizontal=True,
+                key=acct_key,
+            )
+            st.caption(
+                "Located = found in room · Signed out = with a tech · Unaccounted for = missing"
+            )
+            mark_ordered = st.checkbox(
+                "Ordered",
+                key=ordered_key,
+                help="Check this when you have ordered the replacement. "
+                "The tool leaves Unaccounted and goes to Part Ordered.",
+            )
+
+        cost_key = f"assign_repl_cost_{assign_id}"
+        existing_cost = tool_replacement_cost(selected_assign)
+        if cost_key not in st.session_state:
+            st.session_state[cost_key] = (
+                f"{existing_cost:.2f}" if existing_cost is not None else ""
+            )
+        st.text_input(
+            "Replacement cost ($) — optional",
+            placeholder="Leave blank until you order the replacement",
+            key=cost_key,
+            help="Optional. Enter the price when you know what it will cost to replace this tool.",
+        )
+
+        if currently_out and assign_acct != ACCOUNTABILITY_SIGNED_OUT and not mark_ordered:
+            st.caption("Note: this tool currently has an open checkout.")
+
+        save_label = (
+            "Move to Ordered" if mark_ordered else "Save status / location"
+        )
+        if st.button(
+            save_label,
+            type="primary",
+            use_container_width=True,
+            key="assign_loc_save",
+        ):
+            final_acct = (
+                ACCOUNTABILITY_PART_ORDERED if mark_ordered else assign_acct
+            )
+            clean_loc = str(assign_loc or "").strip()
+            needs_location = final_acct not in (
+                ACCOUNTABILITY_UNACCOUNTED,
+                ACCOUNTABILITY_PART_ORDERED,
+            )
+            if needs_location and not clean_loc:
+                st.error("Enter a location, or mark the tool Unaccounted / Ordered.")
+            else:
+                ok, msg = update_tool(
+                    data,
+                    assign_id,
+                    location=clean_loc,
+                    accountability=final_acct,
+                    replacement_cost=st.session_state.get(cost_key, ""),
+                    set_replacement_cost=True,
+                )
+                if ok:
+                    _persist(data)
+                    st.session_state.pop(loc_key, None)
+                    st.session_state.pop(acct_key, None)
+                    st.session_state.pop(ordered_key, None)
+                    st.session_state.pop(cost_key, None)
+                    if final_acct == ACCOUNTABILITY_PART_ORDERED:
+                        _set_flash(f"{msg} — moved to Part Ordered.")
+                    elif final_acct == ACCOUNTABILITY_UNACCOUNTED:
+                        _set_flash(f"{msg} — kept on Unaccounted list.")
+                    elif final_acct == ACCOUNTABILITY_SIGNED_OUT:
+                        _set_flash(f"{msg} — marked Signed out.")
+                    else:
+                        _set_flash(f"{msg} — location saved.")
+                    st.rerun()
+                else:
+                    st.error(msg)
         st.markdown("---")
     elif show_assign:
         st.markdown(
