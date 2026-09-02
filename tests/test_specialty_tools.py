@@ -193,6 +193,44 @@ def test_inventory_missing_goes_unaccounted_and_signed_out_blocks_mark():
     assert pdf.startswith(b"%PDF")
 
 
+def test_part_ordered_box_and_receive_assigns_location():
+    from lib.specialty_tools_storage import (
+        ACCOUNTABILITY_LOCATED,
+        ACCOUNTABILITY_PART_ORDERED,
+        inventory_stats,
+        receive_ordered_part,
+        update_tool,
+    )
+
+    data = _load_seed()
+    tool = next(t for t in data["tools"] if t.get("tool_no") == "C-4150A")
+    tid = tool["id"]
+    before = inventory_stats(data)["part_ordered"]
+
+    ok, msg = update_tool(data, tid, accountability=ACCOUNTABILITY_PART_ORDERED)
+    assert ok, msg
+    assert tool["accountability"] == ACCOUNTABILITY_PART_ORDERED
+    assert inventory_stats(data)["part_ordered"] == before + 1
+    ordered = search_tools(data, only_part_ordered=True)
+    assert any(t["id"] == tid for t in ordered)
+    assert not any(t["id"] == tid for t in search_tools(data, only_unaccounted=True))
+    assert not any(
+        t["id"] == tid for t in search_tools(data, only_without_location=True)
+    )
+
+    ok, msg = receive_ordered_part(data, tid, "")
+    assert not ok
+    assert "location" in msg.lower()
+    assert tool["accountability"] == ACCOUNTABILITY_PART_ORDERED
+
+    ok, msg = receive_ordered_part(data, tid, "shelf d")
+    assert ok, msg
+    assert tool["accountability"] == ACCOUNTABILITY_LOCATED
+    assert tool["location"] == "SHELF D"
+    assert not any(t["id"] == tid for t in search_tools(data, only_part_ordered=True))
+    assert inventory_stats(data)["part_ordered"] == before
+
+
 def test_add_and_search_tool():
     data = _load_seed()
     ok, msg, tool = add_tool(

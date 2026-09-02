@@ -29,6 +29,7 @@ from lib.specialty_tools_storage import (
     ACCOUNTABILITY_LABELS,
     ACCOUNTABILITY_LOCATED,
     ACCOUNTABILITY_OPTIONS,
+    ACCOUNTABILITY_PART_ORDERED,
     ACCOUNTABILITY_SIGNED_OUT,
     ACCOUNTABILITY_UNACCOUNTED,
     INVENTORY_RESULT_LOCATED,
@@ -53,6 +54,7 @@ from lib.specialty_tools_storage import (
     load_inventory,
     normalize_accountability,
     qty_out,
+    receive_ordered_part,
     replace_tools_from_import,
     returned_tool_report_rows,
     save_inventory,
@@ -96,6 +98,22 @@ def _goto_page(page_name: str, **prefs) -> None:
     if prefs:
         st.session_state["_pending_prefs"] = dict(prefs)
     st.rerun()
+
+
+def _catalog_card_prefs(**overrides) -> dict:
+    """Catalog filters used by dashboard stat cards. Unset boxes stay off."""
+    prefs = {
+        "cat_query": "",
+        "cat_status": "all",
+        "cat_loc": "(any location)",
+        "cat_out": False,
+        "cat_with_loc": False,
+        "cat_without_loc": False,
+        "cat_unaccounted": False,
+        "cat_part_ordered": False,
+    }
+    prefs.update(overrides)
+    return prefs
 
 
 def _apply_pending_navigation() -> None:
@@ -381,13 +399,7 @@ with row1[0]:
     ):
         _goto_page(
             "Catalog",
-            cat_query="",
-            cat_status="active",
-            cat_loc="(any location)",
-            cat_out=False,
-            cat_with_loc=False,
-            cat_without_loc=False,
-            cat_unaccounted=False,
+            **_catalog_card_prefs(cat_status="active"),
         )
 with row1[1]:
     if st.button(
@@ -414,13 +426,7 @@ with row2[0]:
     ):
         _goto_page(
             "Catalog",
-            cat_query="",
-            cat_status="all",
-            cat_loc="(any location)",
-            cat_out=False,
-            cat_with_loc=True,
-            cat_without_loc=False,
-            cat_unaccounted=False,
+            **_catalog_card_prefs(cat_with_loc=True),
         )
 with row2[1]:
     if st.button(
@@ -431,13 +437,7 @@ with row2[1]:
     ):
         _goto_page(
             "Catalog",
-            cat_query="",
-            cat_status="active",
-            cat_loc="(any location)",
-            cat_out=False,
-            cat_with_loc=False,
-            cat_without_loc=True,
-            cat_unaccounted=False,
+            **_catalog_card_prefs(cat_status="active", cat_without_loc=True),
         )
 with row2[2]:
     if st.button(
@@ -448,13 +448,19 @@ with row2[2]:
     ):
         _goto_page(
             "Catalog",
-            cat_query="",
-            cat_status="all",
-            cat_loc="(any location)",
-            cat_out=False,
-            cat_with_loc=False,
-            cat_without_loc=False,
-            cat_unaccounted=True,
+            **_catalog_card_prefs(cat_unaccounted=True),
+        )
+row3 = st.columns(3)
+with row3[0]:
+    if st.button(
+        f"📦  Part Ordered\n{stats.get('part_ordered', 0)}",
+        key="stat_part_ordered",
+        use_container_width=True,
+        help="Open Catalog — replacements on order; receive them here",
+    ):
+        _goto_page(
+            "Catalog",
+            **_catalog_card_prefs(cat_part_ordered=True),
         )
 
 overdue = list_overdue_checkouts(data)
@@ -774,6 +780,8 @@ elif page == "Catalog":
         st.session_state.cat_without_loc = False
     if "cat_unaccounted" not in st.session_state:
         st.session_state.cat_unaccounted = False
+    if "cat_part_ordered" not in st.session_state:
+        st.session_state.cat_part_ordered = False
 
     f1, f2, f3, f4 = st.columns([2.2, 1.2, 1.2, 1.4])
     with f1:
@@ -800,9 +808,14 @@ elif page == "Catalog":
         only_with_loc = st.checkbox("Has location", key="cat_with_loc")
         only_without_loc = st.checkbox("No location", key="cat_without_loc")
         only_unaccounted = st.checkbox("Unaccounted", key="cat_unaccounted")
+        only_part_ordered = st.checkbox("Part Ordered", key="cat_part_ordered")
 
-    # Keep location filters exclusive with unaccounted / each other
-    if only_unaccounted:
+    # Keep location / box filters exclusive with each other
+    if only_part_ordered:
+        only_unaccounted = False
+        only_with_loc = False
+        only_without_loc = False
+    elif only_unaccounted:
         only_with_loc = False
         only_without_loc = False
     elif only_without_loc and only_with_loc:
@@ -818,13 +831,15 @@ elif page == "Catalog":
         only_with_location=only_with_loc,
         only_without_location=only_without_loc,
         only_unaccounted=only_unaccounted,
+        only_part_ordered=only_part_ordered,
     )
     st.caption(f"{len(matches)} tool(s)")
+    _show_flash()
 
     if only_without_loc:
         st.markdown(
             status_banner(
-                "Tools with no published location — assign location and mark Located, Signed out, or Unaccounted for.",
+                "Tools with no published location — assign location and mark Located, Signed out, Unaccounted for, or Part Ordered.",
                 "warn",
             ),
             unsafe_allow_html=True,
@@ -832,14 +847,71 @@ elif page == "Catalog":
     if only_unaccounted:
         st.markdown(
             status_banner(
-                "Unaccounted tools — relocate them or note replacement plans here.",
+                "Unaccounted tools — relocate them, mark Part Ordered, or note replacement plans here.",
                 "error",
             ),
             unsafe_allow_html=True,
         )
+    if only_part_ordered:
+        st.markdown(
+            status_banner(
+                "Parts on order — when a replacement arrives, assign a location to receive it.",
+                "info",
+            ),
+            unsafe_allow_html=True,
+        )
 
-    show_assign = (only_without_loc or only_unaccounted) and matches and is_admin()
-    if show_assign:
+    acct_caption = (
+        "Located = found in room · Signed out = with a tech · "
+        "Unaccounted for = missing · Part Ordered = replacement ordered"
+    )
+    box_filter = only_without_loc or only_unaccounted or only_part_ordered
+    show_assign = box_filter and matches and is_admin()
+    if show_assign and only_part_ordered:
+        st.markdown("##### Receive ordered part")
+        st.caption(
+            "Pick the tool that arrived, type where you put it, then receive. "
+            "It leaves Part Ordered and is marked Located."
+        )
+        recv_options = {
+            t["id"]: f"{t.get('tool_no')} — {t.get('description')}"
+            for t in matches[:400]
+        }
+        recv_id = st.selectbox(
+            "Tool",
+            options=list(recv_options.keys()),
+            format_func=lambda i: recv_options[i],
+            key="recv_part_tool",
+        )
+        recv_loc_key = f"recv_part_loc_{recv_id}"
+        if recv_loc_key not in st.session_state:
+            selected_recv = next((t for t in matches if t["id"] == recv_id), None)
+            st.session_state[recv_loc_key] = str(
+                (selected_recv or {}).get("location") or ""
+            ).upper()
+        recv_loc = st.text_input(
+            "Put it here (location)",
+            placeholder="E.G. SHELF D / WALL 14",
+            key=recv_loc_key,
+            on_change=_force_upper,
+            args=(recv_loc_key,),
+        )
+        if st.button(
+            "Receive part & assign location",
+            type="primary",
+            use_container_width=True,
+            key="recv_part_save",
+        ):
+            ok, msg = receive_ordered_part(data, recv_id, recv_loc)
+            if ok:
+                _persist(data)
+                st.session_state.pop(recv_loc_key, None)
+                _set_flash(f"{msg} — removed from Part Ordered.")
+                st.rerun()
+            else:
+                st.error(msg)
+        st.markdown("---")
+    elif show_assign:
         st.markdown(
             "##### Assign location & status"
             if only_without_loc
@@ -878,26 +950,21 @@ elif page == "Catalog":
         if acct_key not in st.session_state:
             st.session_state[acct_key] = default_acct
 
-        a1, a2 = st.columns([1.4, 1.6])
-        with a1:
-            assign_loc = st.text_input(
-                "Special location / assignment",
-                placeholder="E.G. SHELF D / WALL 14 (OPTIONAL IF UNACCOUNTED)",
-                key=loc_key,
-                on_change=_force_upper,
-                args=(loc_key,),
-            )
-        with a2:
-            assign_acct = st.radio(
-                "This tool is",
-                options=list(ACCOUNTABILITY_OPTIONS),
-                format_func=lambda s: ACCOUNTABILITY_LABELS[s],
-                horizontal=True,
-                key=acct_key,
-            )
-            st.caption(
-                "Located = found in room · Signed out = with a tech · Unaccounted for = missing"
-            )
+        assign_loc = st.text_input(
+            "Special location / assignment",
+            placeholder="E.G. SHELF D / WALL 14 (OPTIONAL IF UNACCOUNTED OR PART ORDERED)",
+            key=loc_key,
+            on_change=_force_upper,
+            args=(loc_key,),
+        )
+        assign_acct = st.radio(
+            "This tool is",
+            options=list(ACCOUNTABILITY_OPTIONS),
+            format_func=lambda s: ACCOUNTABILITY_LABELS[s],
+            horizontal=True,
+            key=acct_key,
+        )
+        st.caption(acct_caption)
 
         show_cost = only_unaccounted or assign_acct == ACCOUNTABILITY_UNACCOUNTED
         if show_cost:
@@ -927,8 +994,14 @@ elif page == "Catalog":
             key="assign_loc_save",
         ):
             clean_loc = str(assign_loc or "").strip()
-            if assign_acct != ACCOUNTABILITY_UNACCOUNTED and not clean_loc:
-                st.error("Enter a location, or mark the tool Unaccounted for.")
+            needs_location = assign_acct not in (
+                ACCOUNTABILITY_UNACCOUNTED,
+                ACCOUNTABILITY_PART_ORDERED,
+            )
+            if needs_location and not clean_loc:
+                st.error(
+                    "Enter a location, or mark the tool Unaccounted for / Part Ordered."
+                )
             else:
                 kwargs = {
                     "location": clean_loc,
@@ -947,6 +1020,8 @@ elif page == "Catalog":
                     st.session_state.pop(f"assign_repl_cost_{assign_id}", None)
                     if assign_acct == ACCOUNTABILITY_UNACCOUNTED:
                         _set_flash(f"{msg} — moved to Unaccounted list.")
+                    elif assign_acct == ACCOUNTABILITY_PART_ORDERED:
+                        _set_flash(f"{msg} — moved to Part Ordered.")
                     elif assign_acct == ACCOUNTABILITY_SIGNED_OUT:
                         _set_flash(f"{msg} — marked Signed out.")
                     else:
@@ -955,7 +1030,7 @@ elif page == "Catalog":
                 else:
                     st.error(msg)
         st.markdown("---")
-    elif (only_without_loc or only_unaccounted) and matches and not is_admin():
+    elif box_filter and matches and not is_admin():
         st.caption("Sign in as Manager or Admin to update locations and status.")
 
     if matches:
@@ -993,7 +1068,7 @@ elif page == "Catalog":
         if len(matches) > 400:
             st.caption(f"Showing first 400 of {len(matches)}. Narrow your search.")
 
-        if is_admin() and not only_without_loc and not only_unaccounted:
+        if is_admin() and not box_filter:
             _show_flash()
             st.markdown("---")
             st.markdown("##### Edit / adjust location")
@@ -1216,7 +1291,7 @@ elif page == "Catalog":
                             st.session_state.pop(confirm_key, None)
                             st.session_state.pop(force_key, None)
                             st.rerun()
-        elif not only_without_loc and not only_unaccounted:
+        elif not box_filter:
             st.caption("Sign in as Manager or Admin to edit tool locations.")
     else:
         if only_without_loc:
@@ -1227,6 +1302,11 @@ elif page == "Catalog":
         elif only_unaccounted:
             st.markdown(
                 status_banner("No unaccounted tools right now.", "success"),
+                unsafe_allow_html=True,
+            )
+        elif only_part_ordered:
+            st.markdown(
+                status_banner("No parts on order right now.", "success"),
                 unsafe_allow_html=True,
             )
         else:

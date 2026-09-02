@@ -24,16 +24,24 @@ OVERDUE_AFTER_DAYS = 5
 ACCOUNTABILITY_LOCATED = "located"
 ACCOUNTABILITY_SIGNED_OUT = "signed_out"
 ACCOUNTABILITY_UNACCOUNTED = "unaccounted"
+ACCOUNTABILITY_PART_ORDERED = "part_ordered"
 ACCOUNTABILITY_OPTIONS = (
     ACCOUNTABILITY_LOCATED,
     ACCOUNTABILITY_SIGNED_OUT,
     ACCOUNTABILITY_UNACCOUNTED,
+    ACCOUNTABILITY_PART_ORDERED,
 )
 ACCOUNTABILITY_LABELS = {
     ACCOUNTABILITY_LOCATED: "Located",
     ACCOUNTABILITY_SIGNED_OUT: "Signed out",
     ACCOUNTABILITY_UNACCOUNTED: "Unaccounted for",
+    ACCOUNTABILITY_PART_ORDERED: "Part Ordered",
 }
+# These statuses have their own dashboard boxes and are not "no location" tools.
+ACCOUNTABILITY_BOXES = (
+    ACCOUNTABILITY_UNACCOUNTED,
+    ACCOUNTABILITY_PART_ORDERED,
+)
 
 
 def normalize_accountability(value: Any) -> str:
@@ -42,6 +50,8 @@ def normalize_accountability(value: Any) -> str:
         return ACCOUNTABILITY_SIGNED_OUT
     if raw in {"missing", "lost", "unaccounted_for", "unaccounted"}:
         return ACCOUNTABILITY_UNACCOUNTED
+    if raw in {"partordered", "ordered", "on_order", "onorder", "part_on_order"}:
+        return ACCOUNTABILITY_PART_ORDERED
     if raw in {"found", "located", "ok"}:
         return ACCOUNTABILITY_LOCATED
     if raw in ACCOUNTABILITY_OPTIONS:
@@ -771,6 +781,31 @@ def update_tool(
     return True, f"Updated {tool.get('tool_no')}."
 
 
+def receive_ordered_part(
+    data: Dict[str, Any],
+    tool_id: str,
+    location: str,
+) -> Tuple[bool, str]:
+    """Receive a Part Ordered tool: assign a location and mark it Located."""
+    tool = find_tool(data, tool_id)
+    if not tool:
+        return False, "Tool not found."
+    if normalize_accountability(tool.get("accountability")) != ACCOUNTABILITY_PART_ORDERED:
+        return False, "This tool is not in the Part Ordered list."
+    clean_loc = str(location or "").strip().upper()
+    if not clean_loc:
+        return False, "Enter a location for the received part."
+    ok, msg = update_tool(
+        data,
+        tool_id,
+        location=clean_loc,
+        accountability=ACCOUNTABILITY_LOCATED,
+    )
+    if not ok:
+        return False, msg
+    return True, f"Received {tool.get('tool_no')} — now Located at {clean_loc}."
+
+
 def _tool_no_key(tool: Dict[str, Any] | None) -> str:
     if not isinstance(tool, dict):
         return ""
@@ -911,10 +946,14 @@ def inventory_stats(data: Dict[str, Any]) -> Dict[str, int]:
     checkouts = data.get("active_checkouts") or []
     without_location = 0
     unaccounted = 0
+    part_ordered = 0
     for t in tools:
         acct = normalize_accountability(t.get("accountability"))
         if acct == ACCOUNTABILITY_UNACCOUNTED:
             unaccounted += 1
+            continue
+        if acct == ACCOUNTABILITY_PART_ORDERED:
+            part_ordered += 1
             continue
         if not str(t.get("location") or "").strip():
             without_location += 1
@@ -929,10 +968,11 @@ def inventory_stats(data: Dict[str, Any]) -> Dict[str, int]:
             for t in tools
             if str(t.get("location") or "").strip()
             and normalize_accountability(t.get("accountability"))
-            != ACCOUNTABILITY_UNACCOUNTED
+            not in ACCOUNTABILITY_BOXES
         ),
         "without_location": without_location,
         "unaccounted": unaccounted,
+        "part_ordered": part_ordered,
         "overdue": len(list_overdue_checkouts(data)),
     }
 
@@ -995,6 +1035,7 @@ def search_tools(
     only_with_location: bool = False,
     only_without_location: bool = False,
     only_unaccounted: bool = False,
+    only_part_ordered: bool = False,
 ) -> List[Dict[str, Any]]:
     q = str(query or "").strip().lower()
     loc_filter = str(location or "").strip().lower()
@@ -1007,15 +1048,16 @@ def search_tools(
             continue
         acct = normalize_accountability(tool.get("accountability"))
         tool_loc = str(tool.get("location") or "").strip()
-        if only_unaccounted:
+        if only_part_ordered:
+            if acct != ACCOUNTABILITY_PART_ORDERED:
+                continue
+        elif only_unaccounted:
             if acct != ACCOUNTABILITY_UNACCOUNTED:
                 continue
         else:
-            if only_with_location and (not tool_loc or acct == ACCOUNTABILITY_UNACCOUNTED):
+            if only_with_location and (not tool_loc or acct in ACCOUNTABILITY_BOXES):
                 continue
-            if only_without_location and (
-                tool_loc or acct == ACCOUNTABILITY_UNACCOUNTED
-            ):
+            if only_without_location and (tool_loc or acct in ACCOUNTABILITY_BOXES):
                 continue
         if loc_filter and loc_filter not in tool_loc.lower():
             continue
@@ -1217,7 +1259,9 @@ def inventory_count_rows(
             INVENTORY_RESULT_RETURNED,
         ):
             continue
-        if focus_key == "needs_count" and (is_signed_out or result):
+        if focus_key == "needs_count" and (
+            is_signed_out or result or acct == ACCOUNTABILITY_PART_ORDERED
+        ):
             continue
 
         tech_names = sorted(
