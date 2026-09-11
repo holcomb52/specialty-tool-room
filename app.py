@@ -471,7 +471,7 @@ with row3[1]:
         use_container_width=True,
         help="Tools still Unaccounted — assign a location if found, or price them to order",
     ):
-        _goto_page("Replacement Costs")
+        _goto_page("Replacement Costs", need_order_filter="all")
 
 overdue = list_overdue_checkouts(data)
 if overdue:
@@ -1484,38 +1484,75 @@ elif page == "Replacement Costs":
     st.markdown("##### Need to order")
     st.caption(
         "Tools still Unaccounted — these are missing from the room. "
-        "If you find one, assign a location to put it in inventory. "
+        "Click a card to filter the list. If you find one, assign a location to put it in inventory. "
         "It leaves this list and drops out of the Need to order total. "
         "If you still need to buy it, enter a replacement cost or mark it Ordered in Catalog."
     )
     summary = unaccounted_replacement_totals(data)
     rows = summary["rows"]
+    if "need_order_filter" not in st.session_state:
+        st.session_state.need_order_filter = "all"
+    focus = str(st.session_state.get("need_order_filter") or "all")
+    if focus not in ("all", "priced", "unpriced", "total"):
+        focus = "all"
+        st.session_state.need_order_filter = "all"
+
     c1, c2, c3, c4 = st.columns(4)
     with c1:
-        st.markdown(
-            stat_card("Need to order", str(summary["tool_count"]), "orange", "❓"),
-            unsafe_allow_html=True,
-        )
+        if st.button(
+            f"❓  Need to order\n{summary['tool_count']}",
+            key="stat_need_order_all",
+            type="primary" if focus == "all" else "secondary",
+            use_container_width=True,
+            help="Show every Unaccounted tool",
+        ):
+            st.session_state.need_order_filter = "all"
+            st.rerun()
     with c2:
-        st.markdown(
-            stat_card("With price", str(summary["priced_count"]), "amber", "$"),
-            unsafe_allow_html=True,
-        )
+        if st.button(
+            f"$  With price\n{summary['priced_count']}",
+            key="stat_need_order_priced",
+            type="primary" if focus == "priced" else "secondary",
+            use_container_width=True,
+            help="Show only tools that already have a replacement price",
+        ):
+            st.session_state.need_order_filter = "priced"
+            st.rerun()
     with c3:
-        st.markdown(
-            stat_card("Need price", str(summary["unpriced_count"]), "stone", "—"),
-            unsafe_allow_html=True,
-        )
+        if st.button(
+            f"—  Need price\n{summary['unpriced_count']}",
+            key="stat_need_order_unpriced",
+            type="primary" if focus == "unpriced" else "secondary",
+            use_container_width=True,
+            help="Show only tools that still need a replacement price",
+        ):
+            st.session_state.need_order_filter = "unpriced"
+            st.rerun()
     with c4:
-        st.markdown(
-            stat_card(
-                "Running total",
-                f"${summary['total_cost']:,.2f}",
-                "green",
-                "∑",
-            ),
-            unsafe_allow_html=True,
-        )
+        if st.button(
+            f"∑  Running total\n${summary['total_cost']:,.2f}",
+            key="stat_need_order_total",
+            type="primary" if focus == "total" else "secondary",
+            use_container_width=True,
+            help="Show priced tools that make up the running total",
+        ):
+            st.session_state.need_order_filter = "total"
+            st.rerun()
+
+    if focus in ("priced", "total"):
+        visible = [r for r in rows if r.get("replacement_cost") is not None]
+        focus_label = "priced tools"
+    elif focus == "unpriced":
+        visible = [r for r in rows if r.get("replacement_cost") is None]
+        focus_label = "tools that still need a price"
+    else:
+        visible = rows
+        focus_label = "tools to order"
+
+    if st.session_state.get("_need_order_filter_applied") != focus:
+        st.session_state.pop("need_order_locate_tool", None)
+        st.session_state.pop("repl_cost_tool", None)
+        st.session_state["_need_order_filter_applied"] = focus
 
     if not rows:
         st.markdown(
@@ -1523,38 +1560,45 @@ elif page == "Replacement Costs":
             unsafe_allow_html=True,
         )
     else:
-        table_rows = [
-            {
-                "Tool #": r.get("tool_no", ""),
-                "Description": r.get("description", ""),
-                "Location": r.get("location", "") or "(none)",
-                "Qty": r.get("qty", 1),
-                "Replace $": (
-                    f"${float(r['replacement_cost']):,.2f}"
-                    if r.get("replacement_cost") is not None
-                    else "(not priced yet)"
-                ),
-                "Line total": (
-                    f"${float(r['replacement_cost']) * int(r.get('qty') or 1):,.2f}"
-                    if r.get("replacement_cost") is not None
-                    else "—"
-                ),
-                "Notes": r.get("notes", ""),
-            }
-            for r in rows
-        ]
-        st.dataframe(pd.DataFrame(table_rows), use_container_width=True, hide_index=True)
-        st.markdown(
-            f"**Running total to replace priced tools: "
-            f"${summary['total_cost']:,.2f}**"
-            + (
-                f"  ·  {summary['unpriced_count']} still need a price"
-                if summary["unpriced_count"]
-                else ""
+        st.caption(f"Showing {len(visible)} {focus_label}")
+        if not visible:
+            st.markdown(
+                status_banner("No tools in this card's list.", "info"),
+                unsafe_allow_html=True,
             )
-        )
+        else:
+            table_rows = [
+                {
+                    "Tool #": r.get("tool_no", ""),
+                    "Description": r.get("description", ""),
+                    "Location": r.get("location", "") or "(none)",
+                    "Qty": r.get("qty", 1),
+                    "Replace $": (
+                        f"${float(r['replacement_cost']):,.2f}"
+                        if r.get("replacement_cost") is not None
+                        else "(not priced yet)"
+                    ),
+                    "Line total": (
+                        f"${float(r['replacement_cost']) * int(r.get('qty') or 1):,.2f}"
+                        if r.get("replacement_cost") is not None
+                        else "—"
+                    ),
+                    "Notes": r.get("notes", ""),
+                }
+                for r in visible
+            ]
+            st.dataframe(pd.DataFrame(table_rows), use_container_width=True, hide_index=True)
+            st.markdown(
+                f"**Running total to replace priced tools: "
+                f"${summary['total_cost']:,.2f}**"
+                + (
+                    f"  ·  {summary['unpriced_count']} still need a price"
+                    if summary["unpriced_count"]
+                    else ""
+                )
+            )
 
-        if is_admin():
+        if is_admin() and visible:
             st.markdown("---")
             st.markdown("##### Found it — put in inventory")
             st.caption(
@@ -1563,7 +1607,7 @@ elif page == "Replacement Costs":
             )
             loc_opts = {
                 r["id"]: f"{r.get('tool_no')} — {r.get('description')}"
-                for r in rows
+                for r in visible
             }
             locate_id = st.selectbox(
                 "Tool",
@@ -1571,7 +1615,7 @@ elif page == "Replacement Costs":
                 format_func=lambda i: loc_opts[i],
                 key="need_order_locate_tool",
             )
-            selected_locate = next((r for r in rows if r["id"] == locate_id), None)
+            selected_locate = next((r for r in visible if r["id"] == locate_id), None)
             locate_pick_key = f"need_order_loc_pick_{locate_id}"
             locate_loc_key = f"need_order_loc_{locate_id}"
             if locate_loc_key not in st.session_state:
@@ -1627,7 +1671,7 @@ elif page == "Replacement Costs":
                         else "  (no price yet)"
                     )
                 )
-                for r in rows
+                for r in visible
             }
             cost_id = st.selectbox(
                 "Unaccounted tool",
@@ -1635,7 +1679,7 @@ elif page == "Replacement Costs":
                 format_func=lambda i: cost_opts[i],
                 key="repl_cost_tool",
             )
-            selected_row = next((r for r in rows if r["id"] == cost_id), None)
+            selected_row = next((r for r in visible if r["id"] == cost_id), None)
             cost_field = f"repl_cost_value_{cost_id}"
             if cost_field not in st.session_state:
                 existing = (selected_row or {}).get("replacement_cost")
@@ -1666,7 +1710,7 @@ elif page == "Replacement Costs":
                     st.rerun()
                 else:
                     st.error(msg)
-        else:
+        elif not is_admin():
             st.caption("Sign in as Manager or Admin to locate tools or enter replacement costs.")
 
 elif page == "Add Tool":

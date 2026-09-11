@@ -145,6 +145,14 @@ div.st-key-stat_without_location button { border-color: rgba(148,163,184,0.35) !
 div.st-key-stat_unaccounted button { border-color: rgba(239,68,68,0.45) !important; color: #f87171 !important; }
 div.st-key-stat_part_ordered button { border-color: rgba(56,189,248,0.45) !important; color: #38bdf8 !important; }
 div.st-key-stat_need_to_order button { border-color: rgba(34,197,94,0.4) !important; color: #4ade80 !important; }
+div.st-key-stat_need_order_all button { border-color: rgba(234,88,12,0.45) !important; color: #fb923c !important; }
+div.st-key-stat_need_order_priced button { border-color: rgba(245,158,11,0.4) !important; color: #fbbf24 !important; }
+div.st-key-stat_need_order_unpriced button { border-color: rgba(168,162,158,0.35) !important; color: #d6d3d1 !important; }
+div.st-key-stat_need_order_total button { border-color: rgba(34,197,94,0.4) !important; color: #4ade80 !important; }
+div.st-key-stat_need_order_all button[kind="primary"] { background: rgba(234,88,12,0.16) !important; }
+div.st-key-stat_need_order_priced button[kind="primary"] { background: rgba(245,158,11,0.16) !important; }
+div.st-key-stat_need_order_unpriced button[kind="primary"] { background: rgba(168,162,158,0.12) !important; }
+div.st-key-stat_need_order_total button[kind="primary"] { background: rgba(34,197,94,0.16) !important; }
 
 .status-banner {
     display: flex; align-items: center; gap: 0.65rem;
