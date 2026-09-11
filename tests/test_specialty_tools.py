@@ -231,6 +231,39 @@ def test_part_ordered_box_and_receive_assigns_location():
     assert inventory_stats(data)["part_ordered"] == before
 
 
+def test_locate_unaccounted_tool_puts_in_inventory():
+    from lib.specialty_tools_storage import (
+        ACCOUNTABILITY_LOCATED,
+        ACCOUNTABILITY_UNACCOUNTED,
+        inventory_stats,
+        locate_unaccounted_tool,
+        unaccounted_replacement_totals,
+        update_tool,
+    )
+
+    data = _load_seed()
+    tool = next(t for t in data["tools"] if t.get("tool_no") == "C-4150A")
+    tid = tool["id"]
+    ok, msg = update_tool(data, tid, accountability=ACCOUNTABILITY_UNACCOUNTED)
+    assert ok, msg
+    before = unaccounted_replacement_totals(data)["tool_count"]
+    assert before >= 1
+    assert any(t["id"] == tid for t in search_tools(data, only_unaccounted=True))
+
+    ok, msg = locate_unaccounted_tool(data, tid, "")
+    assert not ok
+    assert "location" in msg.lower()
+    assert tool["accountability"] == ACCOUNTABILITY_UNACCOUNTED
+
+    ok, msg = locate_unaccounted_tool(data, tid, "wall 14")
+    assert ok, msg
+    assert tool["accountability"] == ACCOUNTABILITY_LOCATED
+    assert tool["location"] == "WALL 14"
+    assert not any(t["id"] == tid for t in search_tools(data, only_unaccounted=True))
+    assert unaccounted_replacement_totals(data)["tool_count"] == before - 1
+    assert inventory_stats(data)["with_location"] >= 1
+
+
 def test_add_and_search_tool():
     data = _load_seed()
     ok, msg, tool = add_tool(

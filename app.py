@@ -52,6 +52,7 @@ from lib.specialty_tools_storage import (
     inventory_stats,
     list_overdue_checkouts,
     load_inventory,
+    locate_unaccounted_tool,
     normalize_accountability,
     qty_out,
     receive_ordered_part,
@@ -468,7 +469,7 @@ with row3[1]:
         f"💲  Need to order\n${order_spend['total_cost']:,.2f}",
         key="stat_need_to_order",
         use_container_width=True,
-        help="Running total to replace Unaccounted tools (open Replacement Costs)",
+        help="Tools still Unaccounted — assign a location if found, or price them to order",
     ):
         _goto_page("Replacement Costs")
 
@@ -1479,17 +1480,20 @@ elif page == "Catalog":
             st.info("No tools match those filters.")
 
 elif page == "Replacement Costs":
-    st.markdown("##### Unaccounted tools — replacement spend")
+    _show_flash()
+    st.markdown("##### Need to order")
     st.caption(
-        "Running total of what it will cost to replace tools currently marked Unaccounted. "
-        "Costs are optional until you order the part."
+        "Tools still Unaccounted — these are missing from the room. "
+        "If you find one, assign a location to put it in inventory. "
+        "It leaves this list and drops out of the Need to order total. "
+        "If you still need to buy it, enter a replacement cost or mark it Ordered in Catalog."
     )
     summary = unaccounted_replacement_totals(data)
     rows = summary["rows"]
     c1, c2, c3, c4 = st.columns(4)
     with c1:
         st.markdown(
-            stat_card("Unaccounted", str(summary["tool_count"]), "orange", "❓"),
+            stat_card("Need to order", str(summary["tool_count"]), "orange", "❓"),
             unsafe_allow_html=True,
         )
     with c2:
@@ -1523,6 +1527,7 @@ elif page == "Replacement Costs":
             {
                 "Tool #": r.get("tool_no", ""),
                 "Description": r.get("description", ""),
+                "Location": r.get("location", "") or "(none)",
                 "Qty": r.get("qty", 1),
                 "Replace $": (
                     f"${float(r['replacement_cost']):,.2f}"
@@ -1550,6 +1555,67 @@ elif page == "Replacement Costs":
         )
 
         if is_admin():
+            st.markdown("---")
+            st.markdown("##### Found it — put in inventory")
+            st.caption(
+                "Pick a tool you located in the room, type its shelf/wall, then save. "
+                "It is marked Located and removed from Need to order."
+            )
+            loc_opts = {
+                r["id"]: f"{r.get('tool_no')} — {r.get('description')}"
+                for r in rows
+            }
+            locate_id = st.selectbox(
+                "Tool",
+                options=list(loc_opts.keys()),
+                format_func=lambda i: loc_opts[i],
+                key="need_order_locate_tool",
+            )
+            selected_locate = next((r for r in rows if r["id"] == locate_id), None)
+            locate_pick_key = f"need_order_loc_pick_{locate_id}"
+            locate_loc_key = f"need_order_loc_{locate_id}"
+            if locate_loc_key not in st.session_state:
+                st.session_state[locate_loc_key] = str(
+                    (selected_locate or {}).get("location") or ""
+                ).upper()
+            if locate_pick_key not in st.session_state:
+                st.session_state[locate_pick_key] = "(type below)"
+            known_locs = ["(type below)"] + unique_locations(data)
+            loc_pick = st.selectbox(
+                "Copy an existing location",
+                options=known_locs,
+                key=locate_pick_key,
+                help="Pick a wall/shelf already in use, or type a new location below.",
+            )
+            prev_pick_key = f"_prev_{locate_pick_key}"
+            prev_pick = st.session_state.get(prev_pick_key)
+            if loc_pick and loc_pick != "(type below)" and loc_pick != prev_pick:
+                st.session_state[locate_loc_key] = str(loc_pick).upper()
+            st.session_state[prev_pick_key] = loc_pick
+            locate_loc = st.text_input(
+                "Put it here (location)",
+                placeholder="E.G. SHELF D / WALL 14",
+                key=locate_loc_key,
+                on_change=_force_upper,
+                args=(locate_loc_key,),
+            )
+            if st.button(
+                "Put in inventory",
+                type="primary",
+                use_container_width=True,
+                key="need_order_locate_save",
+            ):
+                ok, msg = locate_unaccounted_tool(data, locate_id, locate_loc)
+                if ok:
+                    _persist(data)
+                    st.session_state.pop(locate_loc_key, None)
+                    st.session_state.pop(locate_pick_key, None)
+                    st.session_state.pop(prev_pick_key, None)
+                    _set_flash(f"{msg} — removed from Need to order.")
+                    st.rerun()
+                else:
+                    st.error(msg)
+
             st.markdown("---")
             st.markdown("##### Enter / update a replacement cost")
             cost_opts = {
@@ -1601,7 +1667,7 @@ elif page == "Replacement Costs":
                 else:
                     st.error(msg)
         else:
-            st.caption("Sign in as Manager or Admin to enter replacement costs.")
+            st.caption("Sign in as Manager or Admin to locate tools or enter replacement costs.")
 
 elif page == "Add Tool":
     if not is_admin():

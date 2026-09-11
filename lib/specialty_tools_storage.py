@@ -806,6 +806,31 @@ def receive_ordered_part(
     return True, f"Received {tool.get('tool_no')} — now Located at {clean_loc}."
 
 
+def locate_unaccounted_tool(
+    data: Dict[str, Any],
+    tool_id: str,
+    location: str,
+) -> Tuple[bool, str]:
+    """Found a Need-to-order tool: assign a location and mark it Located."""
+    tool = find_tool(data, tool_id)
+    if not tool:
+        return False, "Tool not found."
+    if normalize_accountability(tool.get("accountability")) != ACCOUNTABILITY_UNACCOUNTED:
+        return False, "This tool is not on the Need to order list."
+    clean_loc = str(location or "").strip().upper()
+    if not clean_loc:
+        return False, "Enter a location for this tool."
+    ok, msg = update_tool(
+        data,
+        tool_id,
+        location=clean_loc,
+        accountability=ACCOUNTABILITY_LOCATED,
+    )
+    if not ok:
+        return False, msg
+    return True, f"{tool.get('tool_no')} is now Located at {clean_loc}."
+
+
 def _tool_no_key(tool: Dict[str, Any] | None) -> str:
     if not isinstance(tool, dict):
         return ""
