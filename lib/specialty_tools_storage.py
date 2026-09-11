@@ -873,6 +873,60 @@ def locate_unaccounted_tool(
     return True, f"{tool.get('tool_no')} is now Located at {clean_loc}."
 
 
+def locate_unaccounted_tools(
+    data: Dict[str, Any],
+    tool_ids: List[str],
+    location: str,
+) -> Tuple[bool, str]:
+    """Put one or more Need-to-order tools in the same location."""
+    clean_loc = str(location or "").strip().upper()
+    if not clean_loc:
+        return False, "Enter a location for the selected tool(s)."
+    ids = [str(tid) for tid in tool_ids if str(tid or "").strip()]
+    if not ids:
+        return False, "Select one or more tools in the list."
+    placed: List[str] = []
+    errors: List[str] = []
+    for tid in ids:
+        tool = find_tool(data, tid)
+        ok, msg = locate_unaccounted_tool(data, tid, clean_loc)
+        if ok:
+            placed.append(str((tool or {}).get("tool_no") or tid))
+        else:
+            errors.append(msg)
+    if not placed:
+        return False, errors[0] if errors else "Could not update the selected tools."
+    if len(placed) == 1:
+        return True, f"{placed[0]} is now Located at {clean_loc}."
+    extra = f" ({errors[0]})" if errors else ""
+    return True, f"{len(placed)} tools are now Located at {clean_loc}.{extra}"
+
+
+def mark_tools_part_ordered(
+    data: Dict[str, Any],
+    tool_ids: List[str],
+) -> Tuple[bool, str]:
+    """Move one or more Need-to-order tools onto the Part Ordered card."""
+    ids = [str(tid) for tid in tool_ids if str(tid or "").strip()]
+    if not ids:
+        return False, "Select one or more tools in the list."
+    moved: List[str] = []
+    for tid in ids:
+        tool = find_tool(data, tid)
+        if not tool:
+            continue
+        if normalize_accountability(tool.get("accountability")) != ACCOUNTABILITY_UNACCOUNTED:
+            continue
+        ok, _msg = update_tool(data, tid, accountability=ACCOUNTABILITY_PART_ORDERED)
+        if ok:
+            moved.append(str(tool.get("tool_no") or tid))
+    if not moved:
+        return False, "None of the selected tools could be moved to Part Ordered."
+    if len(moved) == 1:
+        return True, f"{moved[0]} moved to Part Ordered."
+    return True, f"{len(moved)} tools moved to Part Ordered."
+
+
 def _tool_no_key(tool: Dict[str, Any] | None) -> str:
     if not isinstance(tool, dict):
         return ""

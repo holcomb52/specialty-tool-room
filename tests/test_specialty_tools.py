@@ -288,6 +288,37 @@ def test_locate_unaccounted_tool_puts_in_inventory():
     assert inventory_stats(data)["with_location"] >= 1
 
 
+def test_locate_unaccounted_tools_puts_several_in_same_location():
+    from lib.specialty_tools_storage import (
+        ACCOUNTABILITY_LOCATED,
+        ACCOUNTABILITY_PART_ORDERED,
+        ACCOUNTABILITY_UNACCOUNTED,
+        locate_unaccounted_tools,
+        mark_tools_part_ordered,
+        update_tool,
+    )
+
+    data = {"tools": [], "active_checkouts": [], "history": [], "source": "", "version": 1}
+    ids = []
+    for no in ("T-A", "T-B", "T-C"):
+        ok, msg, tool = add_tool(data, tool_no=no, description=f"BATCH {no}")
+        assert ok, msg
+        ok, msg = update_tool(data, tool["id"], accountability=ACCOUNTABILITY_UNACCOUNTED)
+        assert ok, msg
+        ids.append(tool["id"])
+
+    ok, msg = locate_unaccounted_tools(data, ids[:2], "shelf d")
+    assert ok, msg
+    assert "2 tools" in msg
+    assert find_tool(data, ids[0])["location"] == "SHELF D"
+    assert find_tool(data, ids[1])["accountability"] == ACCOUNTABILITY_LOCATED
+    assert find_tool(data, ids[2])["accountability"] == ACCOUNTABILITY_UNACCOUNTED
+
+    ok, msg = mark_tools_part_ordered(data, [ids[2]])
+    assert ok, msg
+    assert find_tool(data, ids[2])["accountability"] == ACCOUNTABILITY_PART_ORDERED
+
+
 def test_add_and_search_tool():
     data = _load_seed()
     ok, msg, tool = add_tool(
