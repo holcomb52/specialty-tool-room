@@ -53,8 +53,7 @@ from lib.specialty_tools_storage import (
     last_checkout_tech,
     list_overdue_checkouts,
     load_inventory,
-    locate_unaccounted_tools,
-    mark_tools_part_ordered,
+    locate_unaccounted_tool,
     normalize_accountability,
     qty_out,
     receive_ordered_part,
@@ -69,6 +68,54 @@ from lib.specialty_tools_storage import (
     update_checkout,
     update_tool,
 )
+try:
+    from lib.specialty_tools_storage import (
+        locate_unaccounted_tools,
+        mark_tools_part_ordered,
+    )
+except ImportError:
+    def locate_unaccounted_tools(data, tool_ids, location):
+        ids = [str(tid) for tid in tool_ids if str(tid or "").strip()]
+        if not ids:
+            return False, "Select one or more tools in the list."
+        placed = 0
+        last_ok = ""
+        last_err = ""
+        for tid in ids:
+            ok, msg = locate_unaccounted_tool(data, tid, location)
+            if ok:
+                placed += 1
+                last_ok = msg
+            else:
+                last_err = msg
+        if not placed:
+            return False, last_err or "Could not update the selected tools."
+        if placed == 1:
+            return True, last_ok
+        return True, f"{placed} tools are now Located at {str(location or '').strip().upper()}."
+
+    def mark_tools_part_ordered(data, tool_ids):
+        ids = [str(tid) for tid in tool_ids if str(tid or "").strip()]
+        if not ids:
+            return False, "Select one or more tools in the list."
+        moved = 0
+        last_no = ""
+        for tid in ids:
+            tool = find_tool(data, tid)
+            if not tool:
+                continue
+            ok, _msg = update_tool(
+                data, tid, accountability=ACCOUNTABILITY_PART_ORDERED
+            )
+            if ok:
+                moved += 1
+                last_no = str(tool.get("tool_no") or tid)
+        if not moved:
+            return False, "None of the selected tools could be moved to Part Ordered."
+        if moved == 1:
+            return True, f"{last_no} moved to Part Ordered."
+        return True, f"{moved} tools moved to Part Ordered."
+
 from lib.reports_pdf import (
     build_checkout_report_pdf,
     build_inventory_report_pdf,

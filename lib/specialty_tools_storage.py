@@ -11,6 +11,8 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 from lib.specialty_tools_import import empty_inventory
 
+# Reload marker for Streamlit Cloud after batch locate/order helpers.
+
 STORE_KEY = "specialty_tools"
 TABLE = "specialty_tools_store"
 
