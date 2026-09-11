@@ -50,6 +50,7 @@ from lib.specialty_tools_storage import (
     inventory_count_rows,
     inventory_count_stats,
     inventory_stats,
+    last_checkout_tech,
     list_overdue_checkouts,
     load_inventory,
     locate_unaccounted_tool,
@@ -278,6 +279,57 @@ def _force_upper(key: str) -> None:
         uppered = val.upper()
         if uppered != val:
             st.session_state[key] = uppered
+
+
+def _copy_tool_number_button(tool_no: str) -> None:
+    """One-click copy for ordering a specialty tool by number."""
+    import json
+    import streamlit.components.v1 as components
+
+    value = str(tool_no or "").strip()
+    if not value:
+        return
+    payload = json.dumps(value)
+    components.html(
+        f"""
+        <div style="font-family:'Source Sans 3',sans-serif;">
+          <button id="copy-tool-no" style="
+            background: rgba(245,158,11,0.16);
+            border: 1px solid rgba(245,158,11,0.45);
+            color: #fbbf24;
+            border-radius: 10px;
+            padding: 0.55rem 0.85rem;
+            font-weight: 700;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+            cursor: pointer;
+            width: 100%;
+            font-size: 0.82rem;
+          ">Copy tool #</button>
+        </div>
+        <script>
+          const btn = document.getElementById("copy-tool-no");
+          const value = {payload};
+          btn.addEventListener("click", async () => {{
+            try {{
+              await navigator.clipboard.writeText(value);
+              btn.textContent = "Copied";
+              setTimeout(() => {{ btn.textContent = "Copy tool #"; }}, 1200);
+            }} catch (err) {{
+              const box = document.createElement("textarea");
+              box.value = value;
+              document.body.appendChild(box);
+              box.select();
+              document.execCommand("copy");
+              document.body.removeChild(box);
+              btn.textContent = "Copied";
+              setTimeout(() => {{ btn.textContent = "Copy tool #"; }}, 1200);
+            }}
+          }});
+        </script>
+        """,
+        height=48,
+    )
 
 
 def _show_flash() -> None:
@@ -1484,9 +1536,10 @@ elif page == "Replacement Costs":
     st.markdown("##### Need to order")
     st.caption(
         "Tools still Unaccounted — these are missing from the room. "
-        "Click a card to filter the list. If you find one, assign a location to put it in inventory. "
+        "Click a card to filter the list. Click a tool to copy its number, mark it Part Ordered, "
+        "or load it into Found it. If you find one, assign a location to put it in inventory. "
         "It leaves this list and drops out of the Need to order total. "
-        "If you still need to buy it, enter a replacement cost or mark it Ordered in Catalog."
+        "If you still need to buy it, enter a replacement cost or mark it ordered here."
     )
     summary = unaccounted_replacement_totals(data)
     rows = summary["rows"]
@@ -1552,6 +1605,9 @@ elif page == "Replacement Costs":
     if st.session_state.get("_need_order_filter_applied") != focus:
         st.session_state.pop("need_order_locate_tool", None)
         st.session_state.pop("repl_cost_tool", None)
+        st.session_state.pop("need_order_ordered_tool", None)
+        st.session_state.pop("need_order_pick", None)
+        st.session_state.pop("_need_order_table_row", None)
         st.session_state["_need_order_filter_applied"] = focus
 
     if not rows:
@@ -1587,7 +1643,68 @@ elif page == "Replacement Costs":
                 }
                 for r in visible
             ]
-            st.dataframe(pd.DataFrame(table_rows), use_container_width=True, hide_index=True)
+            st.caption("Click a tool to copy its number, mark it ordered, or load it into the sections below.")
+            table_event = st.dataframe(
+                pd.DataFrame(table_rows),
+                use_container_width=True,
+                hide_index=True,
+                on_select="rerun",
+                selection_mode="single-row",
+                key="need_order_pick",
+                height=420,
+                column_config={
+                    "Tool #": st.column_config.TextColumn("Tool #", width="medium"),
+                    "Description": st.column_config.TextColumn("Description", width="large"),
+                },
+            )
+            selected_rows = []
+            selection = getattr(table_event, "selection", None)
+            if selection is not None:
+                selected_rows = list(getattr(selection, "rows", None) or [])
+            picked = None
+            if selected_rows:
+                idx = int(selected_rows[0])
+                if 0 <= idx < len(visible):
+                    picked = visible[idx]
+                    if st.session_state.get("_need_order_table_row") != idx:
+                        st.session_state["_need_order_table_row"] = idx
+                        st.session_state["need_order_locate_tool"] = picked["id"]
+                        st.session_state["repl_cost_tool"] = picked["id"]
+                        st.session_state["need_order_ordered_tool"] = picked["id"]
+            if picked:
+                if is_admin():
+                    copy_l, copy_m, copy_r = st.columns([3.2, 1.15, 1.35])
+                else:
+                    copy_l, copy_m, copy_r = st.columns([4, 1, 0.01])
+                with copy_l:
+                    st.markdown(
+                        f"**{picked.get('tool_no', '')}** · {picked.get('description', '')}"
+                    )
+                with copy_m:
+                    _copy_tool_number_button(str(picked.get("tool_no") or ""))
+                with copy_r:
+                    if is_admin() and st.button(
+                        "Mark ordered",
+                        use_container_width=True,
+                        key="need_order_mark_ordered_bar",
+                        help="Move this tool to the Part Ordered card",
+                    ):
+                        ok, msg = update_tool(
+                            data,
+                            picked["id"],
+                            accountability=ACCOUNTABILITY_PART_ORDERED,
+                        )
+                        if ok:
+                            _persist(data)
+                            st.session_state.pop("need_order_pick", None)
+                            st.session_state.pop("_need_order_table_row", None)
+                            st.session_state.pop("need_order_locate_tool", None)
+                            st.session_state.pop("repl_cost_tool", None)
+                            st.session_state.pop("need_order_ordered_tool", None)
+                            _set_flash(f"{msg} — moved to Part Ordered.")
+                            st.rerun()
+                        else:
+                            st.error(msg)
             st.markdown(
                 f"**Running total to replace priced tools: "
                 f"${summary['total_cost']:,.2f}**"
@@ -1599,69 +1716,10 @@ elif page == "Replacement Costs":
             )
 
         if is_admin() and visible:
-            st.markdown("---")
-            st.markdown("##### Found it — put in inventory")
-            st.caption(
-                "Pick a tool you located in the room, type its shelf/wall, then save. "
-                "It is marked Located and removed from Need to order."
-            )
             loc_opts = {
                 r["id"]: f"{r.get('tool_no')} — {r.get('description')}"
                 for r in visible
             }
-            locate_id = st.selectbox(
-                "Tool",
-                options=list(loc_opts.keys()),
-                format_func=lambda i: loc_opts[i],
-                key="need_order_locate_tool",
-            )
-            selected_locate = next((r for r in visible if r["id"] == locate_id), None)
-            locate_pick_key = f"need_order_loc_pick_{locate_id}"
-            locate_loc_key = f"need_order_loc_{locate_id}"
-            if locate_loc_key not in st.session_state:
-                st.session_state[locate_loc_key] = str(
-                    (selected_locate or {}).get("location") or ""
-                ).upper()
-            if locate_pick_key not in st.session_state:
-                st.session_state[locate_pick_key] = "(type below)"
-            known_locs = ["(type below)"] + unique_locations(data)
-            loc_pick = st.selectbox(
-                "Copy an existing location",
-                options=known_locs,
-                key=locate_pick_key,
-                help="Pick a wall/shelf already in use, or type a new location below.",
-            )
-            prev_pick_key = f"_prev_{locate_pick_key}"
-            prev_pick = st.session_state.get(prev_pick_key)
-            if loc_pick and loc_pick != "(type below)" and loc_pick != prev_pick:
-                st.session_state[locate_loc_key] = str(loc_pick).upper()
-            st.session_state[prev_pick_key] = loc_pick
-            locate_loc = st.text_input(
-                "Put it here (location)",
-                placeholder="E.G. SHELF D / WALL 14",
-                key=locate_loc_key,
-                on_change=_force_upper,
-                args=(locate_loc_key,),
-            )
-            if st.button(
-                "Put in inventory",
-                type="primary",
-                use_container_width=True,
-                key="need_order_locate_save",
-            ):
-                ok, msg = locate_unaccounted_tool(data, locate_id, locate_loc)
-                if ok:
-                    _persist(data)
-                    st.session_state.pop(locate_loc_key, None)
-                    st.session_state.pop(locate_pick_key, None)
-                    st.session_state.pop(prev_pick_key, None)
-                    _set_flash(f"{msg} — removed from Need to order.")
-                    st.rerun()
-                else:
-                    st.error(msg)
-
-            st.markdown("---")
-            st.markdown("##### Enter / update a replacement cost")
             cost_opts = {
                 r["id"]: (
                     f"{r.get('tool_no')} — {r.get('description')}"
@@ -1673,45 +1731,146 @@ elif page == "Replacement Costs":
                 )
                 for r in visible
             }
-            cost_id = st.selectbox(
-                "Unaccounted tool",
-                options=list(cost_opts.keys()),
-                format_func=lambda i: cost_opts[i],
-                key="repl_cost_tool",
-            )
-            selected_row = next((r for r in visible if r["id"] == cost_id), None)
-            cost_field = f"repl_cost_value_{cost_id}"
-            if cost_field not in st.session_state:
-                existing = (selected_row or {}).get("replacement_cost")
-                st.session_state[cost_field] = (
-                    f"{float(existing):.2f}" if existing is not None else ""
+
+            with st.expander("Found it — put in inventory", expanded=False, icon="📍"):
+                st.caption(
+                    "Click a tool in the list above, or pick one here. "
+                    "Type its shelf/wall, then save. It is marked Located and removed from Need to order."
                 )
-            st.text_input(
-                "Replacement cost ($)",
-                placeholder="Optional — leave blank until you order",
-                key=cost_field,
-            )
-            if st.button(
-                "Save replacement cost",
-                type="primary",
-                use_container_width=True,
-                key="repl_cost_save",
-            ):
-                ok, msg = update_tool(
-                    data,
-                    cost_id,
-                    replacement_cost=st.session_state.get(cost_field, ""),
-                    set_replacement_cost=True,
+                locate_pick, locate_copy = st.columns([4, 1])
+                with locate_pick:
+                    locate_id = st.selectbox(
+                        "Tool",
+                        options=list(loc_opts.keys()),
+                        format_func=lambda i: loc_opts[i],
+                        key="need_order_locate_tool",
+                    )
+                selected_locate = next((r for r in visible if r["id"] == locate_id), None)
+                with locate_copy:
+                    st.markdown("<div style='height:1.7rem'></div>", unsafe_allow_html=True)
+                    _copy_tool_number_button(
+                        str((selected_locate or {}).get("tool_no") or "")
+                    )
+                locate_pick_key = f"need_order_loc_pick_{locate_id}"
+                locate_loc_key = f"need_order_loc_{locate_id}"
+                if locate_loc_key not in st.session_state:
+                    st.session_state[locate_loc_key] = str(
+                        (selected_locate or {}).get("location") or ""
+                    ).upper()
+                if locate_pick_key not in st.session_state:
+                    st.session_state[locate_pick_key] = "(type below)"
+                known_locs = ["(type below)"] + unique_locations(data)
+                loc_pick = st.selectbox(
+                    "Copy an existing location",
+                    options=known_locs,
+                    key=locate_pick_key,
+                    help="Pick a wall/shelf already in use, or type a new location below.",
                 )
-                if ok:
-                    _persist(data)
-                    st.session_state.pop(cost_field, None)
-                    st.success(msg)
-                    st.rerun()
-                else:
-                    st.error(msg)
+                prev_pick_key = f"_prev_{locate_pick_key}"
+                prev_pick = st.session_state.get(prev_pick_key)
+                if loc_pick and loc_pick != "(type below)" and loc_pick != prev_pick:
+                    st.session_state[locate_loc_key] = str(loc_pick).upper()
+                st.session_state[prev_pick_key] = loc_pick
+                locate_loc = st.text_input(
+                    "Put it here (location)",
+                    placeholder="E.G. SHELF D / WALL 14",
+                    key=locate_loc_key,
+                    on_change=_force_upper,
+                    args=(locate_loc_key,),
+                )
+                if st.button(
+                    "Put in inventory",
+                    type="primary",
+                    use_container_width=True,
+                    key="need_order_locate_save",
+                ):
+                    ok, msg = locate_unaccounted_tool(data, locate_id, locate_loc)
+                    if ok:
+                        _persist(data)
+                        st.session_state.pop(locate_loc_key, None)
+                        st.session_state.pop(locate_pick_key, None)
+                        st.session_state.pop(prev_pick_key, None)
+                        st.session_state.pop("need_order_pick", None)
+                        st.session_state.pop("_need_order_table_row", None)
+                        _set_flash(f"{msg} — removed from Need to order.")
+                        st.rerun()
+                    else:
+                        st.error(msg)
+
+            with st.expander("Enter / update a replacement cost", expanded=False, icon="💲"):
+                cost_id = st.selectbox(
+                    "Unaccounted tool",
+                    options=list(cost_opts.keys()),
+                    format_func=lambda i: cost_opts[i],
+                    key="repl_cost_tool",
+                )
+                selected_row = next((r for r in visible if r["id"] == cost_id), None)
+                cost_field = f"repl_cost_value_{cost_id}"
+                if cost_field not in st.session_state:
+                    existing = (selected_row or {}).get("replacement_cost")
+                    st.session_state[cost_field] = (
+                        f"{float(existing):.2f}" if existing is not None else ""
+                    )
+                st.text_input(
+                    "Replacement cost ($)",
+                    placeholder="Optional — leave blank until you order",
+                    key=cost_field,
+                )
+                if st.button(
+                    "Save replacement cost",
+                    type="primary",
+                    use_container_width=True,
+                    key="repl_cost_save",
+                ):
+                    ok, msg = update_tool(
+                        data,
+                        cost_id,
+                        replacement_cost=st.session_state.get(cost_field, ""),
+                        set_replacement_cost=True,
+                    )
+                    if ok:
+                        _persist(data)
+                        st.session_state.pop(cost_field, None)
+                        st.success(msg)
+                        st.rerun()
+                    else:
+                        st.error(msg)
+
+            with st.expander("Mark as Part Ordered", expanded=False, icon="📦"):
+                st.caption(
+                    "Use this after you place the order. The tool leaves Need to order "
+                    "and goes to the Part Ordered card until it arrives."
+                )
+                ordered_id = st.selectbox(
+                    "Tool",
+                    options=list(loc_opts.keys()),
+                    format_func=lambda i: loc_opts[i],
+                    key="need_order_ordered_tool",
+                )
+                if st.button(
+                    "Move to Part Ordered",
+                    type="primary",
+                    use_container_width=True,
+                    key="need_order_mark_ordered",
+                ):
+                    ok, msg = update_tool(
+                        data,
+                        ordered_id,
+                        accountability=ACCOUNTABILITY_PART_ORDERED,
+                    )
+                    if ok:
+                        _persist(data)
+                        st.session_state.pop("need_order_pick", None)
+                        st.session_state.pop("_need_order_table_row", None)
+                        st.session_state.pop("need_order_locate_tool", None)
+                        st.session_state.pop("repl_cost_tool", None)
+                        st.session_state.pop("need_order_ordered_tool", None)
+                        _set_flash(f"{msg} — moved to Part Ordered.")
+                        st.rerun()
+                    else:
+                        st.error(msg)
         elif not is_admin():
-            st.caption("Sign in as Manager or Admin to locate tools or enter replacement costs.")
+            st.caption("Sign in as Manager or Admin to locate tools, enter costs, or mark parts ordered.")
 
 elif page == "Add Tool":
     if not is_admin():
@@ -2541,16 +2700,26 @@ elif page == "History":
     if not history:
         st.info("No activity yet.")
     else:
-        rows = [
-            {
-                "When": _fmt_when(h.get("at", "")),
-                "Action": h.get("action", ""),
-                "Tool #": h.get("tool_no", ""),
-                "Description": h.get("description", ""),
-                "Tech": h.get("tech_name", ""),
-                "Qty": h.get("qty", ""),
-                "Note": h.get("note", ""),
-            }
-            for h in history
-        ]
+        last_tech_cache: dict[str, str] = {}
+        rows = []
+        for h in history:
+            cache_key = str(h.get("tool_id") or "") or str(h.get("tool_no") or "")
+            if cache_key not in last_tech_cache:
+                last_tech_cache[cache_key] = last_checkout_tech(
+                    data,
+                    tool_id=str(h.get("tool_id") or ""),
+                    tool_no=str(h.get("tool_no") or ""),
+                )
+            rows.append(
+                {
+                    "When": _fmt_when(h.get("at", "")),
+                    "Action": h.get("action", ""),
+                    "Tool #": h.get("tool_no", ""),
+                    "Description": h.get("description", ""),
+                    "Tech": h.get("tech_name", ""),
+                    "Last out to": last_tech_cache[cache_key],
+                    "Qty": h.get("qty", ""),
+                    "Note": h.get("note", ""),
+                }
+            )
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)

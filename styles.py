@@ -249,5 +249,12 @@ div[data-testid="stTabs"] button[data-baseweb="tab"] {
     font-family: 'Barlow Condensed', sans-serif;
     font-size: 1.05rem; font-weight: 700; letter-spacing: 0.03em;
 }
+
+div[data-testid="stExpander"] {
+    background: rgba(28,25,23,0.85);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 14px;
+    margin: 0.45rem 0;
+}
 </style>
 """

@@ -190,6 +190,48 @@ def returned_tool_report_rows(
     return rows
 
 
+def last_checkout_tech(
+    data: Dict[str, Any],
+    *,
+    tool_id: str = "",
+    tool_no: str = "",
+) -> str:
+    """Last technician who had this tool checked out (still out or already returned)."""
+    tid = str(tool_id or "").strip()
+    tno = str(tool_no or "").strip().lower()
+    if not tid and not tno:
+        return ""
+
+    def _matches(item: Dict[str, Any]) -> bool:
+        if tid and str(item.get("tool_id") or "").strip() == tid:
+            return True
+        if tno and str(item.get("tool_no") or "").strip().lower() == tno:
+            return True
+        return False
+
+    open_matches = [
+        c for c in (data.get("active_checkouts") or []) if _matches(c)
+    ]
+    if open_matches:
+        open_matches.sort(
+            key=lambda c: str(c.get("checked_out_at") or ""),
+            reverse=True,
+        )
+        name = str(open_matches[0].get("tech_name") or "").strip()
+        if name:
+            return name
+
+    for entry in data.get("history") or []:
+        if entry.get("action") not in ("checkout", "checkin", "checkout_corrected"):
+            continue
+        if not _matches(entry):
+            continue
+        name = str(entry.get("tech_name") or "").strip()
+        if name:
+            return name
+    return ""
+
+
 def checkouts_for_technician(
     data: Dict[str, Any], tech_name: str
 ) -> List[Dict[str, Any]]:

@@ -14,6 +14,7 @@ from lib.specialty_tools_storage import (
     find_tool,
     find_tool_by_number,
     inventory_stats,
+    last_checkout_tech,
     list_overdue_checkouts,
     qty_available,
     search_tools,
@@ -68,6 +69,29 @@ def test_checkout_and_checkin_cycle():
     ok, msg = checkin_checkout(data, checkout_id)
     assert ok, msg
     assert qty_available(data, tool) == 1
+
+
+def test_last_checkout_tech_follows_open_and_returned_loans():
+    data = {"tools": [], "active_checkouts": [], "history": [], "source": "", "version": 1}
+    ok, msg, tool = add_tool(
+        data, tool_no="T-LAST", description="LAST TECH TEST", quantity=1
+    )
+    assert ok, msg
+    assert last_checkout_tech(data, tool_id=tool["id"]) == ""
+
+    ok, msg = checkout_tool(data, tool["id"], "Dale Potts", qty=1, ro_number="RO-A")
+    assert ok, msg
+    assert last_checkout_tech(data, tool_id=tool["id"]) == "Dale Potts"
+
+    ok, msg = checkin_checkout(data, data["active_checkouts"][0]["id"])
+    assert ok, msg
+    assert last_checkout_tech(data, tool_id=tool["id"], tool_no="T-LAST") == "Dale Potts"
+
+    ok, msg = checkout_tool(data, tool["id"], "Armand Liebes", qty=1, ro_number="RO-B")
+    assert ok, msg
+    ok, msg = checkin_checkout(data, data["active_checkouts"][0]["id"])
+    assert ok, msg
+    assert last_checkout_tech(data, tool_id=tool["id"]) == "Armand Liebes"
 
 
 def test_overdue_alert_and_dismiss_until_date():
