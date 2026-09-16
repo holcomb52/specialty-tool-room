@@ -5,6 +5,12 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta, timezone
 
 from lib.specialty_tools_storage import (
+    ACCOUNTABILITY_LOCATED,
+    ACCOUNTABILITY_PART_ORDERED,
+    ACCOUNTABILITY_SIGNED_OUT,
+    ACCOUNTABILITY_UNACCOUNTED,
+    REMOTE_ERROR,
+    REMOTE_OK,
     _load_seed,
     add_tool,
     checkin_checkout,
@@ -16,9 +22,12 @@ from lib.specialty_tools_storage import (
     inventory_stats,
     last_checkout_tech,
     list_overdue_checkouts,
+    load_inventory,
     qty_available,
+    save_inventory,
     search_tools,
     update_checkout,
+    update_tool,
 )
 from lib.tech_list import _normalize
 
@@ -430,3 +439,212 @@ def test_delete_tool_blocked_when_signed_out_unless_forced():
     assert ok, msg
     assert find_tool(data, tool["id"]) is None
     assert all(c.get("tool_id") != tool["id"] for c in data["active_checkouts"])
+
+
+def test_checkout_blocked_when_unaccounted_or_part_ordered():
+    data = _load_seed()
+    tool = next(t for t in data["tools"] if t.get("tool_no") == "C-4150A")
+    ok, msg = update_tool(data, tool["id"], accountability=ACCOUNTABILITY_UNACCOUNTED)
+    assert ok, msg
+    ok, msg = checkout_tool(data, tool["id"], "Dale Potts", qty=1, ro_number="RO-MISS")
+    assert not ok
+    assert "Unaccounted" in msg
+    assert data["active_checkouts"] == []
+
+    ok, msg = update_tool(data, tool["id"], accountability=ACCOUNTABILITY_PART_ORDERED)
+    assert ok, msg
+    ok, msg = checkout_tool(data, tool["id"], "Dale Potts", qty=1, ro_number="RO-ORD")
+    assert not ok
+    assert "Part Ordered" in msg
+    assert data["active_checkouts"] == []
+
+
+def test_checkout_marks_signed_out_and_checkin_marks_located():
+    data = _load_seed()
+    tool = next(t for t in data["tools"] if t.get("tool_no") == "C-4150A")
+    ok, msg = checkout_tool(data, tool["id"], "Dale Potts", qty=1, ro_number="RO-ACCT")
+    assert ok, msg
+    assert tool["accountability"] == ACCOUNTABILITY_SIGNED_OUT
+
+    ok, msg = checkin_checkout(data, data["active_checkouts"][0]["id"])
+    assert ok, msg
+    assert tool["accountability"] == ACCOUNTABILITY_LOCATED
+
+
+def test_last_checkout_tech_prefers_tool_id_when_number_is_reused():
+    data = {
+        "tools": [],
+        "active_checkouts": [
+            {
+                "id": "c-new",
+                "tool_id": "new-id",
+                "tool_no": "C-100",
+                "tech_name": "Dale Potts",
+                "checked_out_at": "2026-01-02T00:00:00+00:00",
+            },
+            {
+                "id": "c-old",
+                "tool_id": "old-id",
+                "tool_no": "C-100",
+                "tech_name": "Armand Liebes",
+                "checked_out_at": "2026-01-03T00:00:00+00:00",
+            },
+        ],
+        "history": [],
+        "source": "",
+        "version": 1,
+    }
+    assert last_checkout_tech(data, tool_id="new-id", tool_no="C-100") == "Dale Potts"
+    assert last_checkout_tech(data, tool_id="old-id", tool_no="C-100") == "Armand Liebes"
+
+
+def test_load_inventory_does_not_reseed_when_remote_errors(monkeypatch):
+    saved = {"n": 0}
+
+    monkeypatch.setattr(
+        "lib.specialty_tools_storage._load_remote",
+        lambda: (None, REMOTE_ERROR),
+    )
+    monkeypatch.setattr("lib.specialty_tools_storage._load_local", lambda: None)
+
+    def _fail_if_saved(_data):
+        saved["n"] += 1
+        return True, ""
+
+    monkeypatch.setattr("lib.specialty_tools_storage.save_inventory", _fail_if_saved)
+    data = load_inventory()
+    assert saved["n"] == 0
+    assert data.get("_load_error")
+    assert data.get("tools") == []
+    assert data.get("source") == "cloud-unavailable"
+
+
+def test_load_inventory_keeps_empty_remote_catalog(monkeypatch):
+    empty = {
+        "version": 4,
+        "source": "live",
+        "tools": [],
+        "active_checkouts": [],
+        "history": [{"action": "deleted"}],
+    }
+    saved = {"n": 0}
+    monkeypatch.setattr(
+        "lib.specialty_tools_storage._load_remote",
+        lambda: (empty, REMOTE_OK),
+    )
+    monkeypatch.setattr(
+        "lib.specialty_tools_storage.save_inventory",
+        lambda _data: saved.__setitem__("n", saved["n"] + 1) or (True, ""),
+    )
+    data = load_inventory()
+    assert data["tools"] == []
+    assert data["version"] == 4
+    assert saved["n"] == 0
+
+
+def test_save_inventory_keeps_version_when_remote_fails(monkeypatch):
+    captured = {}
+
+    monkeypatch.setattr("lib.specialty_tools_storage._save_local", lambda _data: None)
+
+    def fake_remote(data, *, expected_version=None):
+        captured["data"] = dict(data)
+        captured["expected_version"] = expected_version
+        return False, "network down"
+
+    monkeypatch.setattr("lib.specialty_tools_storage._save_remote", fake_remote)
+    payload = {
+        "version": 3,
+        "source": "t",
+        "tools": [],
+        "active_checkouts": [],
+        "history": [],
+    }
+    ok, err = save_inventory(payload)
+    assert ok is False
+    assert "network" in err
+    assert payload["version"] == 3
+    assert captured["expected_version"] == 3
+    assert captured["data"]["version"] == 4
+
+
+def test_load_admin_users_does_not_save_seed_when_remote_errors(monkeypatch):
+    from lib import admin_users
+
+    saved = {"n": 0}
+    seed = [
+        {
+            "id": "s1",
+            "name": "Administrator",
+            "username": "admin",
+            "password_hash": "pbkdf2_sha256$salt$digest",
+            "created_at": "2026-01-01T00:00:00+00:00",
+        }
+    ]
+    monkeypatch.setattr(
+        admin_users, "_load_remote", lambda: (None, admin_users.REMOTE_ERROR)
+    )
+    monkeypatch.setattr(admin_users, "_load_local", lambda: [])
+    monkeypatch.setattr(admin_users, "_load_seed", lambda: seed)
+    monkeypatch.setattr(
+        admin_users,
+        "save_admin_users",
+        lambda _users: saved.__setitem__("n", saved["n"] + 1) or (True, ""),
+    )
+    users = admin_users.load_admin_users()
+    assert saved["n"] == 0
+    assert [u["username"] for u in users] == ["admin"]
+
+
+def test_removed_seed_admin_is_not_restored_from_live_remote(monkeypatch):
+    from lib import admin_users
+
+    live = [
+        {
+            "id": "1",
+            "name": "Shop Admin",
+            "username": "shop",
+            "password_hash": "pbkdf2_sha256$salt$digest",
+            "created_at": "2026-01-01T00:00:00+00:00",
+        }
+    ]
+    seed = [
+        {
+            "id": "s1",
+            "name": "Administrator",
+            "username": "admin",
+            "password_hash": "pbkdf2_sha256$salt$digest",
+            "created_at": "2026-01-01T00:00:00+00:00",
+        }
+    ]
+    saved = {"n": 0}
+    monkeypatch.setattr(
+        admin_users, "_load_remote", lambda: (live, admin_users.REMOTE_OK)
+    )
+    monkeypatch.setattr(admin_users, "_load_seed", lambda: seed)
+    monkeypatch.setattr(
+        admin_users,
+        "save_admin_users",
+        lambda _users: saved.__setitem__("n", saved["n"] + 1) or (True, ""),
+    )
+    users = admin_users.load_admin_users()
+    assert [u["username"] for u in users] == ["shop"]
+    assert saved["n"] == 0
+
+
+def test_bootstrap_admin_skips_save_when_remote_errors(monkeypatch):
+    from lib import admin_users
+
+    saved = {"n": 0}
+    monkeypatch.setattr(
+        admin_users, "_load_remote", lambda: (None, admin_users.REMOTE_ERROR)
+    )
+    monkeypatch.setattr(admin_users, "_load_local", lambda: [])
+    monkeypatch.setattr(admin_users, "_load_seed", lambda: [])
+    monkeypatch.setattr(
+        admin_users,
+        "add_admin_user",
+        lambda *a, **k: saved.__setitem__("n", saved["n"] + 1) or (True, "nope", []),
+    )
+    admin_users.ensure_bootstrap_admin("secret-password")
+    assert saved["n"] == 0

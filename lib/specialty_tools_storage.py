@@ -23,6 +23,11 @@ SEED_PATH = DATA_DIR / "specialty_tools_seed.json"
 HISTORY_LIMIT = 500
 OVERDUE_AFTER_DAYS = 5
 
+# Remote jsonb store read outcomes. "error" must never trigger a seed overwrite.
+REMOTE_OK = "ok"
+REMOTE_MISSING = "missing"
+REMOTE_ERROR = "error"
+
 ACCOUNTABILITY_LOCATED = "located"
 ACCOUNTABILITY_SIGNED_OUT = "signed_out"
 ACCOUNTABILITY_UNACCOUNTED = "unaccounted"
@@ -205,10 +210,13 @@ def last_checkout_tech(
         return ""
 
     def _matches(item: Dict[str, Any]) -> bool:
-        if tid and str(item.get("tool_id") or "").strip() == tid:
-            return True
-        if tno and str(item.get("tool_no") or "").strip().lower() == tno:
-            return True
+        item_tid = str(item.get("tool_id") or "").strip()
+        item_tno = str(item.get("tool_no") or "").strip().lower()
+        # Prefer id when both sides have one so reused tool numbers do not collide.
+        if tid and item_tid:
+            return item_tid == tid
+        if tno:
+            return bool(item_tno) and item_tno == tno
         return False
 
     open_matches = [
@@ -330,7 +338,10 @@ def _normalize(data: Dict[str, Any] | None) -> Dict[str, Any]:
     checkouts = data.get("active_checkouts")
     history = data.get("history")
     base["source"] = str(data.get("source") or "")
-    base["version"] = int(data.get("version") or 1)
+    try:
+        base["version"] = int(data.get("version") or 1)
+    except (TypeError, ValueError):
+        base["version"] = 1
     base["tools"] = list(tools) if isinstance(tools, list) else []
     base["active_checkouts"] = list(checkouts) if isinstance(checkouts, list) else []
     base["history"] = list(history) if isinstance(history, list) else []
@@ -363,12 +374,19 @@ def _save_local(data: Dict[str, Any]) -> None:
         pass
 
 
-def _load_remote() -> Optional[Dict[str, Any]]:
+def _store_version(data: Dict[str, Any] | None) -> int:
+    try:
+        return int((data or {}).get("version") or 1)
+    except (TypeError, ValueError):
+        return 1
+
+
+def _load_remote() -> Tuple[Optional[Dict[str, Any]], str]:
     from lib.supabase_client import get_supabase
 
     client = get_supabase()
     if not client:
-        return None
+        return None, REMOTE_MISSING
     try:
         result = (
             client.table(TABLE)
@@ -380,13 +398,18 @@ def _load_remote() -> Optional[Dict[str, Any]]:
         if result.data:
             payload = result.data[0].get("data")
             if isinstance(payload, dict):
-                return _normalize(payload)
+                return _normalize(payload), REMOTE_OK
+            return None, REMOTE_ERROR
+        return None, REMOTE_MISSING
     except Exception:
-        return None
-    return None
+        return None, REMOTE_ERROR
 
 
-def _save_remote(data: Dict[str, Any]) -> Tuple[bool, str]:
+def _save_remote(
+    data: Dict[str, Any],
+    *,
+    expected_version: Optional[int] = None,
+) -> Tuple[bool, str]:
     from lib.supabase_client import get_supabase
 
     client = get_supabase()
@@ -401,11 +424,22 @@ def _save_remote(data: Dict[str, Any]) -> Tuple[bool, str]:
     try:
         existing = (
             client.table(TABLE)
-            .select("store_key")
+            .select("store_key, data")
             .eq("store_key", STORE_KEY)
             .execute()
         )
         if existing.data:
+            if expected_version is not None:
+                remote_payload = existing.data[0].get("data")
+                remote_ver = _store_version(
+                    remote_payload if isinstance(remote_payload, dict) else None
+                )
+                if remote_ver != expected_version:
+                    return (
+                        False,
+                        "This inventory was updated on another device. "
+                        "Hit Refresh and try again.",
+                    )
             client.table(TABLE).update(
                 {"data": data, "updated_at": row["updated_at"]}
             ).eq("store_key", STORE_KEY).execute()
@@ -417,12 +451,39 @@ def _save_remote(data: Dict[str, Any]) -> Tuple[bool, str]:
 
 
 def load_inventory() -> Dict[str, Any]:
-    remote = _load_remote()
-    if remote is not None and remote.get("tools"):
+    remote, status = _load_remote()
+    if status == REMOTE_OK and remote is not None:
+        # Empty catalog is a valid live store — never re-seed over it.
         return remote
+
+    if status == REMOTE_ERROR:
+        local = _load_local()
+        if local is not None:
+            local["_load_error"] = (
+                "Cloud inventory could not be read. Showing the last local copy. "
+                "Do not treat this as the live shop list until Refresh succeeds."
+            )
+            return local
+        empty = empty_inventory("cloud-unavailable")
+        empty["_load_error"] = (
+            "Cloud inventory could not be read. The seed catalog was not loaded "
+            "so existing check-outs cannot be overwritten."
+        )
+        return empty
+
     local = _load_local()
-    if local is not None and local.get("tools"):
+    if local is not None and (
+        local.get("tools")
+        or local.get("active_checkouts")
+        or local.get("history")
+    ):
+        if status == REMOTE_MISSING:
+            from lib.supabase_client import get_supabase
+
+            if get_supabase():
+                save_inventory(local)
         return local
+
     seed = _load_seed()
     if seed.get("tools"):
         save_inventory(seed)
@@ -430,13 +491,15 @@ def load_inventory() -> Dict[str, Any]:
 
 
 def save_inventory(data: Dict[str, Any]) -> Tuple[bool, str]:
+    expected_version = _store_version(data)
     normalized = _normalize(data)
+    normalized["version"] = expected_version + 1
     _save_local(normalized)
-    ok, err = _save_remote(normalized)
-    if not ok:
-        # Keep local store; cloud sync can be fixed later
-        return True, err or ""
-    return True, ""
+    ok, err = _save_remote(normalized, expected_version=expected_version)
+    if ok:
+        data["version"] = normalized["version"]
+        return True, ""
+    return False, err or "Cloud save failed."
 
 
 def _append_history(data: Dict[str, Any], entry: Dict[str, Any]) -> None:
@@ -475,6 +538,23 @@ def qty_available(data: Dict[str, Any], tool: Dict[str, Any]) -> int:
     return max(0, total - qty_out(data, tool["id"]))
 
 
+def _sync_checkout_accountability(data: Dict[str, Any], tool_id: str) -> None:
+    """Keep catalog accountability aligned with open checkouts.
+
+    Does not overwrite Unaccounted / Part Ordered — those lists have their own flows.
+    """
+    tool = find_tool(data, tool_id)
+    if not tool:
+        return
+    acct = normalize_accountability(tool.get("accountability"))
+    if acct in ACCOUNTABILITY_BOXES:
+        return
+    if qty_out(data, tool_id) > 0:
+        tool["accountability"] = ACCOUNTABILITY_SIGNED_OUT
+    else:
+        tool["accountability"] = ACCOUNTABILITY_LOCATED
+
+
 def checkout_tool(
     data: Dict[str, Any],
     tool_id: str,
@@ -493,6 +573,17 @@ def checkout_tool(
     clean_ro = str(ro_number or "").strip()
     if not clean_ro:
         return False, "Enter an RO number."
+    acct = normalize_accountability(tool.get("accountability"))
+    if acct == ACCOUNTABILITY_UNACCOUNTED:
+        return (
+            False,
+            f"{tool.get('tool_no')} is Unaccounted — locate it before check-out.",
+        )
+    if acct == ACCOUNTABILITY_PART_ORDERED:
+        return (
+            False,
+            f"{tool.get('tool_no')} is Part Ordered — receive it before check-out.",
+        )
     take = max(1, int(qty or 1))
     available = qty_available(data, tool)
     if take > available:
@@ -525,6 +616,7 @@ def checkout_tool(
             "at": checkout["checked_out_at"],
         },
     )
+    _sync_checkout_accountability(data, tool_id)
     return True, f"Checked out {tool.get('tool_no')} to {tech}."
 
 
@@ -558,6 +650,7 @@ def checkin_checkout(data: Dict[str, Any], checkout_id: str, note: str = "") -> 
             "checkout_id": checkout_id,
         },
     )
+    _sync_checkout_accountability(data, str(match.get("tool_id") or ""))
     return True, f"Checked in {match.get('tool_no')} from {match.get('tech_name')}."
 
 

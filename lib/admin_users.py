@@ -94,12 +94,20 @@ def _save_local(users: List[Dict[str, Any]]) -> None:
         pass
 
 
-def _load_remote() -> List[Dict[str, Any]] | None:
+REMOTE_OK = "ok"
+REMOTE_MISSING = "missing"
+REMOTE_ERROR = "error"
+
+# Last remote read status — used so bootstrap does not persist over an unread store.
+_last_remote_status = REMOTE_MISSING
+
+
+def _load_remote() -> Tuple[Optional[List[Dict[str, Any]]], str]:
     from lib.supabase_client import get_supabase
 
     client = get_supabase()
     if not client:
-        return None
+        return None, REMOTE_MISSING
     try:
         result = (
             client.table(TABLE)
@@ -111,12 +119,13 @@ def _load_remote() -> List[Dict[str, Any]] | None:
         if result.data:
             payload = result.data[0].get("data")
             if isinstance(payload, dict):
-                return _normalize_users(payload.get("users"))
+                return _normalize_users(payload.get("users")), REMOTE_OK
             if isinstance(payload, list):
-                return _normalize_users(payload)
+                return _normalize_users(payload), REMOTE_OK
+            return None, REMOTE_ERROR
+        return None, REMOTE_MISSING
     except Exception:
-        return None
-    return None
+        return None, REMOTE_ERROR
 
 
 def _save_remote(users: List[Dict[str, Any]]) -> Tuple[bool, str]:
@@ -177,12 +186,25 @@ def _merge_missing_seed_users(
 
 
 def load_admin_users() -> List[Dict[str, Any]]:
-    remote = _load_remote()
-    if remote is not None and remote:
+    global _last_remote_status
+    remote, status = _load_remote()
+    _last_remote_status = status
+    if status == REMOTE_OK and remote is not None:
+        # A live (even empty) remote row is authoritative. Only fill seed
+        # accounts when the cloud list is empty so deleted seed users stay gone.
+        if remote:
+            return remote
         merged, changed = _merge_missing_seed_users(remote)
         if changed:
             save_admin_users(merged)
         return merged
+
+    if status == REMOTE_ERROR:
+        # Never persist seed/local over a store we could not read.
+        local = _load_local()
+        if local:
+            return local
+        return _load_seed()
 
     local = _load_local()
     if local:
@@ -193,7 +215,7 @@ def load_admin_users() -> List[Dict[str, Any]]:
 
     seed = _load_seed()
     if seed:
-        # Materialize seed into live local store (and Supabase when configured).
+        # First launch — materialize seed into live local store (and Supabase).
         save_admin_users(seed)
         return seed
     return []
@@ -322,6 +344,9 @@ def reset_admin_password(
 def ensure_bootstrap_admin(app_password: str) -> None:
     """Create a starter admin from APP_PASSWORD when no admins exist yet."""
     if load_admin_users():
+        return
+    if _last_remote_status == REMOTE_ERROR:
+        # Cloud read failed — do not insert a bootstrap row over unread data.
         return
     pw = str(app_password or "").strip()
     if not pw:
