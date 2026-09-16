@@ -300,8 +300,19 @@ def _get_data():
     """Always reload from Supabase so shop PCs and the phone stay aligned.
 
     Streamlit used to keep a session copy forever, which caused the computer
-    and phone to disagree (and overwrite each other on save).
+    and phone to disagree (and overwrite each other on save). If the last save
+    failed to reach the cloud, keep and retry that session copy so a checkout
+    is not replaced by stale remote data.
     """
+    pending = st.session_state.get("specialty_tools_data")
+    if st.session_state.get("_sync_error") and isinstance(pending, dict):
+        _ok, err = save_inventory(pending)
+        if err:
+            st.session_state["_sync_error"] = err
+            return pending
+        st.session_state.pop("_sync_error", None)
+        st.session_state.specialty_tools_data = pending
+        return pending
     data = load_inventory()
     st.session_state.specialty_tools_data = data
     return data
@@ -497,10 +508,18 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+if data.get("_load_error"):
+    st.markdown(
+        status_banner(str(data["_load_error"]), "error"),
+        unsafe_allow_html=True,
+    )
+
 if st.session_state.get("_sync_error"):
     st.markdown(
         status_banner(
-            f"Saved locally, but cloud sync failed. Run supabase/schema.sql. ({st.session_state['_sync_error']})",
+            f"Saved locally, but cloud sync failed. Refresh after the database is reachable — "
+            f"this session's check-outs were kept so they are not overwritten. "
+            f"({st.session_state['_sync_error']})",
             "warn",
         ),
         unsafe_allow_html=True,
@@ -669,7 +688,13 @@ if page == "Check Out":
         key="co_find",
     )
     tools = search_tools(data, find, status="active")
-    available = [t for t in tools if t.get("qty_available", 0) > 0][:75]
+    available = [
+        t
+        for t in tools
+        if t.get("qty_available", 0) > 0
+        and normalize_accountability(t.get("accountability"))
+        not in (ACCOUNTABILITY_UNACCOUNTED, ACCOUNTABILITY_PART_ORDERED)
+    ][:75]
     if not find.strip():
         st.caption("Type a tool number or keyword, then pick from the matches.")
     if available:
@@ -2231,10 +2256,13 @@ elif page == "Reports":
             for r in rows_raw
         ]
 
-    def _report_summary(rows_raw: list) -> list[tuple[str, str]]:
+    def _report_summary(
+        rows_raw: list, *, returned: bool = False
+    ) -> list[tuple[str, str]]:
+        count_label = "Tools returned" if returned else "Tools signed out"
         if not rows_raw:
             return [
-                ("Tools signed out", "0"),
+                (count_label, "0"),
                 ("Longest out", "—"),
                 ("Over 5 days", "0"),
             ]
@@ -2243,17 +2271,19 @@ elif page == "Reports":
             1 for r in rows_raw if int(r.get("days_out") or 0) >= OVERDUE_AFTER_DAYS
         )
         return [
-            ("Tools signed out", str(len(rows_raw))),
+            (count_label, str(len(rows_raw))),
             ("Longest out", f"{longest} day{'s' if longest != 1 else ''}"),
             ("Over 5 days", str(overdue_n)),
         ]
 
-    def _show_stats(rows_raw: list) -> None:
-        summary = dict(_report_summary(rows_raw))
+    def _show_stats(rows_raw: list, *, returned: bool = False) -> None:
+        summary = dict(_report_summary(rows_raw, returned=returned))
+        count_label = "Tools returned" if returned else "Tools signed out"
+        count_card = "Returned" if returned else "Tools out"
         r1, r2, r3 = st.columns(3)
         with r1:
             st.markdown(
-                stat_card("Tools out", summary["Tools signed out"], "orange", "📤"),
+                stat_card(count_card, summary[count_label], "orange", "📤"),
                 unsafe_allow_html=True,
             )
         with r2:
@@ -2281,12 +2311,13 @@ elif page == "Reports":
         rows_raw: list,
         filename: str,
         key: str,
+        returned: bool = False,
     ) -> None:
         pdf_bytes = build_checkout_report_pdf(
             title=title,
             subtitle=subtitle,
             rows=rows_raw,
-            summary=_report_summary(rows_raw),
+            summary=_report_summary(rows_raw, returned=returned),
         )
         st.download_button(
             "Export PDF",
@@ -2708,9 +2739,10 @@ elif page == "Reports":
                     rows_raw=rows_raw,
                     filename=pdf_name,
                     key="pdf_returned_empty",
+                    returned=True,
                 )
             else:
-                _show_stats(rows_raw)
+                _show_stats(rows_raw, returned=True)
                 st.dataframe(
                     pd.DataFrame(_report_table(rows_raw)),
                     use_container_width=True,
@@ -2722,6 +2754,7 @@ elif page == "Reports":
                     rows_raw=rows_raw,
                     filename=pdf_name,
                     key="pdf_returned",
+                    returned=True,
                 )
 
 elif page == "History":

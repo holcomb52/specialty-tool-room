@@ -1,4 +1,4 @@
-streamlit>=1.32.0,<1.60.0
+streamlit>=1.37.0,<1.60.0
 supabase>=2.4.0
 python-dotenv>=1.0.0
 pandas>=2.0.0

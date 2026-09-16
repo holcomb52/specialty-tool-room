@@ -59,8 +59,8 @@ git push
 ```toml
 SUPABASE_URL = "https://YOUR_PROJECT.supabase.co"
 SUPABASE_KEY = "your_service_role_key_here"
-APP_PASSWORD = "Dino1169"
-TECH_PASSWORD = "Jeep1234"
+APP_PASSWORD = "choose-a-strong-manager-password"
+TECH_PASSWORD = "choose-a-shared-tech-password"
 ```
 
 Use the **service_role** key from Supabase (not the anon key).
