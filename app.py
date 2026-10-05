@@ -14,6 +14,7 @@ from lib.app_auth import (
     current_admin_name,
     is_admin,
     is_manager,
+    is_tech,
     logout,
     pages_for_role,
     require_login,
@@ -177,6 +178,84 @@ def _apply_pending_navigation() -> None:
         st.session_state.nav_page = pending
 
 
+def _remember_checkout_desk(tech_name: str, ro_number: str) -> None:
+    """Keep the tech + RO filled in so the next tool on this job is one search away."""
+    tech = str(tech_name or "").strip()
+    ro = str(ro_number or "").strip()
+    if tech:
+        st.session_state.shop_tech_name = tech
+        st.session_state.co_tech = tech
+    if ro:
+        st.session_state.shop_ro = ro
+        st.session_state.co_ro = ro
+    st.session_state.co_find = ""
+    st.session_state.pop("co_picked_id", None)
+    st.session_state.pop("co_qty", None)
+
+
+def _start_checkout(
+    data,
+    tool_id: str,
+    tech_name: str,
+    *,
+    qty: int = 1,
+    note: str = "",
+    ro_number: str = "",
+) -> None:
+    tech = str(tech_name or "").strip()
+    ro = str(ro_number or "").strip()
+    if not tech:
+        st.error("Select a technician.")
+        return
+    if not ro:
+        st.error("Enter an RO number.")
+        return
+    already_out = checkouts_for_technician(data, tech)
+    if already_out:
+        st.session_state.co_pending = {
+            "tool_id": tool_id,
+            "tech": tech,
+            "qty": int(qty),
+            "note": note,
+            "ro": ro,
+        }
+        st.rerun()
+        return
+    ok, msg = checkout_tool(
+        data,
+        tool_id,
+        tech,
+        qty=int(qty),
+        note=note,
+        ro_number=ro,
+    )
+    if ok:
+        _persist(data)
+        _remember_checkout_desk(tech, ro)
+        _set_flash(msg)
+        st.rerun()
+    else:
+        st.error(msg)
+
+
+def _checkout_match_rank(tool: dict, query: str) -> tuple:
+    """Exact / prefix tool numbers float to the top of checkout search."""
+    q = str(query or "").strip().lower()
+    no = str(tool.get("tool_no") or "").strip().lower()
+    desc = str(tool.get("description") or "").strip().lower()
+    if not q:
+        return (3, no)
+    if no == q:
+        return (0, no)
+    if no.startswith(q):
+        return (1, no)
+    if q in no:
+        return (2, no)
+    if desc.startswith(q):
+        return (3, no)
+    return (4, no)
+
+
 def _clear_checkout_pending() -> None:
     st.session_state.pop("co_pending", None)
     st.session_state.pop("co_ack_checks", None)
@@ -203,8 +282,9 @@ def _complete_pending_checkout(data) -> None:
     )
     if ok:
         _persist(data)
+        _remember_checkout_desk(tech, str(pending.get("ro") or ""))
         _clear_checkout_pending()
-        st.success(msg)
+        _set_flash(msg)
         st.rerun()
     else:
         st.error(msg)
@@ -525,167 +605,193 @@ if st.session_state.get("_sync_error"):
         unsafe_allow_html=True,
     )
 
-stats = inventory_stats(data)
-row1 = st.columns(3)
-row2 = st.columns(3)
-with row1[0]:
-    if st.button(
-        f"🔧  Tools on file\n{stats['active']}",
-        key="stat_tools_on_file",
-        use_container_width=True,
-        help="Open Catalog — all active tools",
-    ):
-        _goto_page(
-            "Catalog",
-            **_catalog_card_prefs(cat_status="active"),
-        )
-with row1[1]:
-    if st.button(
-        f"📤  Checked out now\n{stats['out_now']}",
-        key="stat_checked_out",
-        use_container_width=True,
-        help="Open Out Now — tools currently signed out",
-    ):
-        _goto_page("Out Now", out_now_overdue_only=False)
-with row1[2]:
-    if st.button(
-        f"⚠  Out over 5 days\n{stats['overdue']}",
-        key="stat_overdue",
-        use_container_width=True,
-        help="Open Out Now — tools out 5+ days",
-    ):
-        _goto_page("Out Now", out_now_overdue_only=True)
-with row2[0]:
-    if st.button(
-        f"📍  With location\n{stats['with_location']}",
-        key="stat_with_location",
-        use_container_width=True,
-        help="Open Catalog — tools that have a location assigned",
-    ):
-        _goto_page(
-            "Catalog",
-            **_catalog_card_prefs(cat_with_loc=True),
-        )
-with row2[1]:
-    if st.button(
-        f"⬚  No location\n{stats['without_location']}",
-        key="stat_without_location",
-        use_container_width=True,
-        help="Open Catalog — assign locations to tools missing one",
-    ):
-        _goto_page(
-            "Catalog",
-            **_catalog_card_prefs(cat_status="active", cat_without_loc=True),
-        )
-with row2[2]:
-    if st.button(
-        f"❓  Unaccounted\n{stats['unaccounted']}",
-        key="stat_unaccounted",
-        use_container_width=True,
-        help="Open Catalog — tools marked unaccounted for (relocate or replace)",
-    ):
-        _goto_page(
-            "Catalog",
-            **_catalog_card_prefs(cat_unaccounted=True),
-        )
-row3 = st.columns(3)
-with row3[0]:
-    if st.button(
-        f"📦  Part Ordered\n{stats.get('part_ordered', 0)}",
-        key="stat_part_ordered",
-        use_container_width=True,
-        help="Open Catalog — replacements on order; receive them here",
-    ):
-        _goto_page(
-            "Catalog",
-            **_catalog_card_prefs(cat_part_ordered=True),
-        )
-with row3[1]:
-    order_spend = unaccounted_replacement_totals(data)
-    if st.button(
-        f"💲  Need to order\n${order_spend['total_cost']:,.2f}",
-        key="stat_need_to_order",
-        use_container_width=True,
-        help="Tools still Unaccounted — assign a location if found, or price them to order",
-    ):
-        _goto_page("Replacement Costs", need_order_filter="all")
-
-overdue = list_overdue_checkouts(data)
-if overdue:
-    st.markdown(
-        status_banner(
-            f"{len(overdue)} tool(s) have been out {OVERDUE_AFTER_DAYS}+ days — dismiss until a date if still needed.",
-            "warn",
-        ),
-        unsafe_allow_html=True,
-    )
-    for item in overdue:
-        cid = str(item.get("id") or "")
-        days_out = int(item.get("days_out") or days_checked_out(item))
-        with st.container():
-            st.markdown(
-                f"""
-                <div class="overdue-alert">
-                    <div class="overdue-title">{item.get('tool_no', '')} — {item.get('description', '')}</div>
-                    <div class="overdue-meta">With <strong>{item.get('tech_name', '')}</strong>
-                    · out {days_out} day(s)
-                    · since {_fmt_when(item.get('checked_out_at', ''))}</div>
-                </div>
-                """,
-                unsafe_allow_html=True,
+if page not in ("Check Out", "Check In"):
+    stats = inventory_stats(data)
+    row1 = st.columns(3)
+    row2 = st.columns(3)
+    with row1[0]:
+        if st.button(
+            f"🔧  Tools on file\n{stats['active']}",
+            key="stat_tools_on_file",
+            use_container_width=True,
+            help="Open Catalog — all active tools",
+        ):
+            _goto_page(
+                "Catalog",
+                **_catalog_card_prefs(cat_status="active"),
             )
-            d1, d2, d3 = st.columns([1.4, 1.2, 1])
-            with d1:
-                snooze_until = st.date_input(
-                    "Dismiss alert until",
-                    value=date.today() + timedelta(days=7),
-                    min_value=date.today() + timedelta(days=1),
-                    key=f"overdue_until_{cid}",
-                )
-            with d2:
-                st.write("")
-                st.write("")
-                if st.button(
-                    "Dismiss until date",
-                    key=f"overdue_dismiss_{cid}",
-                    use_container_width=True,
-                ):
-                    ok, msg = dismiss_overdue_alert(data, cid, snooze_until)
-                    if ok:
-                        _persist(data)
-                        st.success(msg)
-                        st.rerun()
-                    else:
-                        st.error(msg)
-            with d3:
-                st.write("")
-                st.write("")
-                if st.button(
-                    "Check in now",
-                    key=f"overdue_checkin_{cid}",
-                    use_container_width=True,
-                    type="primary",
-                ):
-                    ok, msg = checkin_checkout(data, cid)
-                    if ok:
-                        _persist(data)
-                        st.success(msg)
-                        st.rerun()
-                    else:
-                        st.error(msg)
+    with row1[1]:
+        if st.button(
+            f"📤  Checked out now\n{stats['out_now']}",
+            key="stat_checked_out",
+            use_container_width=True,
+            help="Open Out Now — tools currently signed out",
+        ):
+            _goto_page("Out Now", out_now_overdue_only=False)
+    with row1[2]:
+        if st.button(
+            f"⚠  Out over 5 days\n{stats['overdue']}",
+            key="stat_overdue",
+            use_container_width=True,
+            help="Open Out Now — tools out 5+ days",
+        ):
+            _goto_page("Out Now", out_now_overdue_only=True)
+    with row2[0]:
+        if st.button(
+            f"📍  With location\n{stats['with_location']}",
+            key="stat_with_location",
+            use_container_width=True,
+            help="Open Catalog — tools that have a location assigned",
+        ):
+            _goto_page(
+                "Catalog",
+                **_catalog_card_prefs(cat_with_loc=True),
+            )
+    with row2[1]:
+        if st.button(
+            f"⬚  No location\n{stats['without_location']}",
+            key="stat_without_location",
+            use_container_width=True,
+            help="Open Catalog — assign locations to tools missing one",
+        ):
+            _goto_page(
+                "Catalog",
+                **_catalog_card_prefs(cat_status="active", cat_without_loc=True),
+            )
+    with row2[2]:
+        if st.button(
+            f"❓  Unaccounted\n{stats['unaccounted']}",
+            key="stat_unaccounted",
+            use_container_width=True,
+            help="Open Catalog — tools marked unaccounted for (relocate or replace)",
+        ):
+            _goto_page(
+                "Catalog",
+                **_catalog_card_prefs(cat_unaccounted=True),
+            )
+    row3 = st.columns(3)
+    with row3[0]:
+        if st.button(
+            f"📦  Part Ordered\n{stats.get('part_ordered', 0)}",
+            key="stat_part_ordered",
+            use_container_width=True,
+            help="Open Catalog — replacements on order; receive them here",
+        ):
+            _goto_page(
+                "Catalog",
+                **_catalog_card_prefs(cat_part_ordered=True),
+            )
+    with row3[1]:
+        order_spend = unaccounted_replacement_totals(data)
+        if st.button(
+            f"💲  Need to order\n${order_spend['total_cost']:,.2f}",
+            key="stat_need_to_order",
+            use_container_width=True,
+            help="Tools still Unaccounted — assign a location if found, or price them to order",
+        ):
+            _goto_page("Replacement Costs", need_order_filter="all")
 
-st.markdown("<hr>", unsafe_allow_html=True)
+    overdue = list_overdue_checkouts(data)
+    if overdue:
+        st.markdown(
+            status_banner(
+                f"{len(overdue)} tool(s) have been out {OVERDUE_AFTER_DAYS}+ days — dismiss until a date if still needed.",
+                "warn",
+            ),
+            unsafe_allow_html=True,
+        )
+        for item in overdue:
+            cid = str(item.get("id") or "")
+            days_out = int(item.get("days_out") or days_checked_out(item))
+            with st.container():
+                st.markdown(
+                    f"""
+                    <div class="overdue-alert">
+                        <div class="overdue-title">{item.get('tool_no', '')} — {item.get('description', '')}</div>
+                        <div class="overdue-meta">With <strong>{item.get('tech_name', '')}</strong>
+                        · out {days_out} day(s)
+                        · since {_fmt_when(item.get('checked_out_at', ''))}</div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+                d1, d2, d3 = st.columns([1.4, 1.2, 1])
+                with d1:
+                    snooze_until = st.date_input(
+                        "Dismiss alert until",
+                        value=date.today() + timedelta(days=7),
+                        min_value=date.today() + timedelta(days=1),
+                        key=f"overdue_until_{cid}",
+                    )
+                with d2:
+                    st.write("")
+                    st.write("")
+                    if st.button(
+                        "Dismiss until date",
+                        key=f"overdue_dismiss_{cid}",
+                        use_container_width=True,
+                    ):
+                        ok, msg = dismiss_overdue_alert(data, cid, snooze_until)
+                        if ok:
+                            _persist(data)
+                            st.success(msg)
+                            st.rerun()
+                        else:
+                            st.error(msg)
+                with d3:
+                    st.write("")
+                    st.write("")
+                    if st.button(
+                        "Check in now",
+                        key=f"overdue_checkin_{cid}",
+                        use_container_width=True,
+                        type="primary",
+                    ):
+                        ok, msg = checkin_checkout(data, cid)
+                        if ok:
+                            _persist(data)
+                            st.success(msg)
+                            st.rerun()
+                        else:
+                            st.error(msg)
+
+    st.markdown("<hr>", unsafe_allow_html=True)
 
 if page == "Check Out":
     if st.session_state.get("co_pending"):
         _multi_tool_ack_dialog(data)
 
+    _show_flash()
     st.markdown("##### Check out a tool")
+    st.caption(
+        "Set your name and RO once. Search, tap the tool, then check it out. "
+        "Name and RO stay filled so the next tool on this job is faster."
+    )
     techs = _tech_names()
+    if techs and "co_tech" not in st.session_state:
+        remembered = str(st.session_state.get("shop_tech_name") or "")
+        if remembered in techs:
+            st.session_state.co_tech = remembered
+    if "co_ro" not in st.session_state and st.session_state.get("shop_ro"):
+        st.session_state.co_ro = str(st.session_state.get("shop_ro") or "")
+
+    a1, a2 = st.columns(2)
+    with a1:
+        if techs:
+            tech = st.selectbox("Who is taking it?", options=techs, key="co_tech")
+        else:
+            tech = st.text_input("Technician name", key="co_tech_manual")
+            st.caption("Add names under Technicians for a dropdown.")
+    with a2:
+        ro = st.text_input("RO #", key="co_ro", placeholder="Required")
+    note = st.text_input("Note (optional)", key="co_note")
+
     find = st.text_input(
         "Find tool # or description",
         placeholder="e.g. C-4150 or ball joint",
         key="co_find",
+        on_change=_force_upper,
+        args=("co_find",),
     )
     tools = search_tools(data, find, status="active")
     available = [
@@ -694,107 +800,159 @@ if page == "Check Out":
         if t.get("qty_available", 0) > 0
         and normalize_accountability(t.get("accountability"))
         not in (ACCOUNTABILITY_UNACCOUNTED, ACCOUNTABILITY_PART_ORDERED)
-    ][:75]
+    ]
+    available.sort(key=lambda t: _checkout_match_rank(t, find))
+    shown = available[:12]
     if not find.strip():
-        st.caption("Type a tool number or keyword, then pick from the matches.")
-    if available:
-        labels = {
-            t["id"]: (
-                f"{t.get('tool_no')} — {t.get('description')}"
-                + (f"  [{t.get('location')}]" if t.get("location") else "")
-                + f"  ({t.get('qty_available')} avail)"
-            )
-            for t in available
-        }
-        pick = st.selectbox(
-            "Matching tools",
-            options=list(labels.keys()),
-            format_func=lambda i: labels[i],
-            key="co_tool",
+        st.caption("Type a tool number or keyword. Matches appear as tap buttons below.")
+    elif shown:
+        st.caption(
+            f"{len(available)} available — tap the right tool, then Check out."
+            + (" Refine the search to see more." if len(available) > 12 else "")
         )
-        selected = next((t for t in available if t["id"] == pick), None)
-        a1, a2 = st.columns(2)
-        with a1:
-            if techs:
-                tech = st.selectbox("Technician", options=techs, key="co_tech")
-            else:
-                tech = st.text_input("Technician name", key="co_tech_manual")
-                st.caption("Add names under Technicians for a dropdown.")
-        with a2:
-            max_qty = int(selected.get("qty_available") or 1) if selected else 1
-            qty = st.number_input(
-                "Qty", min_value=1, max_value=max(1, max_qty), value=1, key="co_qty"
+        picked_id = str(st.session_state.get("co_picked_id") or "")
+        if picked_id and picked_id not in {t["id"] for t in shown}:
+            picked_id = shown[0]["id"]
+            st.session_state.co_picked_id = picked_id
+        elif not picked_id:
+            picked_id = shown[0]["id"]
+            st.session_state.co_picked_id = picked_id
+        for t in shown:
+            loc = str(t.get("location") or "").strip()
+            label = (
+                f"{t.get('tool_no')} — {t.get('description')}"
+                + (f"\n{loc}" if loc else "")
+                + f"  ·  {t.get('qty_available')} avail"
             )
-        b1, b2 = st.columns(2)
-        with b1:
-            ro = st.text_input("RO #", key="co_ro", placeholder="Required")
-        with b2:
-            note = st.text_input("Note (optional)", key="co_note")
-        if st.button("Check out", type="primary", use_container_width=True, key="co_btn"):
-            tech_name = str(tech or "").strip()
-            ro_clean = str(ro or "").strip()
-            if not tech_name:
-                st.error("Select a technician.")
-            elif not ro_clean:
-                st.error("Enter an RO number.")
-            else:
-                already_out = checkouts_for_technician(data, tech_name)
-                if already_out:
-                    st.session_state.co_pending = {
-                        "tool_id": pick,
-                        "tech": tech_name,
-                        "qty": int(qty),
-                        "note": note,
-                        "ro": ro_clean,
-                    }
-                    st.rerun()
-                else:
-                    ok, msg = checkout_tool(
-                        data,
-                        pick,
-                        tech_name,
-                        qty=int(qty),
-                        note=note,
-                        ro_number=ro_clean,
-                    )
-                    if ok:
-                        _persist(data)
-                        st.success(msg)
-                        st.rerun()
-                    else:
-                        st.error(msg)
+            if st.button(
+                label,
+                key=f"co_pick_{t['id']}",
+                type="primary" if t["id"] == picked_id else "secondary",
+                use_container_width=True,
+            ):
+                st.session_state.co_picked_id = t["id"]
+                st.rerun()
+        selected = next((t for t in shown if t["id"] == picked_id), shown[0])
+        max_qty = int(selected.get("qty_available") or 1)
+        qty = 1
+        if max_qty > 1:
+            qty = st.number_input(
+                "Qty", min_value=1, max_value=max_qty, value=1, key="co_qty"
+            )
+        st.markdown(
+            f"**Selected:** {selected.get('tool_no')} — {selected.get('description')}"
+        )
+        if st.button(
+            f"Check out {selected.get('tool_no')}",
+            type="primary",
+            use_container_width=True,
+            key="co_btn",
+        ):
+            _start_checkout(
+                data,
+                selected["id"],
+                str(tech or ""),
+                qty=int(qty),
+                note=str(note or ""),
+                ro_number=str(ro or ""),
+            )
     elif find.strip():
-        st.info("No available tools match that search.")
+        blocked = [
+            t
+            for t in tools
+            if t.get("id") not in {a["id"] for a in available}
+        ]
+        if blocked:
+            first = blocked[0]
+            acct = normalize_accountability(first.get("accountability"))
+            if first.get("qty_available", 0) <= 0:
+                st.warning(
+                    f"{first.get('tool_no')} is already signed out. Check it in first."
+                )
+            elif acct == ACCOUNTABILITY_UNACCOUNTED:
+                st.warning(
+                    f"{first.get('tool_no')} is on the Need to order list — not in the room."
+                )
+            elif acct == ACCOUNTABILITY_PART_ORDERED:
+                st.warning(f"{first.get('tool_no')} is on order and not in yet.")
+            else:
+                st.info("No available tools match that search.")
+        else:
+            st.info("No available tools match that search.")
 
 elif page == "Check In":
+    _show_flash()
     st.markdown("##### Check in a tool")
     checkouts = list(data.get("active_checkouts") or [])
+    shop_tech = str(st.session_state.get("shop_tech_name") or "").strip()
+    if shop_tech and checkouts:
+        mine = checkouts_for_technician(data, shop_tech)
+        show_mine = bool(st.session_state.get("ci_only_mine", is_tech() and bool(mine)))
+        if "ci_only_mine" not in st.session_state:
+            st.session_state.ci_only_mine = show_mine
+        b1, b2 = st.columns(2)
+        with b1:
+            if st.button(
+                f"My tools ({len(mine)})",
+                key="ci_filter_mine",
+                type="primary" if st.session_state.ci_only_mine else "secondary",
+                use_container_width=True,
+            ):
+                st.session_state.ci_only_mine = True
+                st.rerun()
+        with b2:
+            if st.button(
+                f"Everyone ({len(checkouts)})",
+                key="ci_filter_all",
+                type="primary" if not st.session_state.ci_only_mine else "secondary",
+                use_container_width=True,
+            ):
+                st.session_state.ci_only_mine = False
+                st.rerun()
+        if st.session_state.ci_only_mine:
+            checkouts = mine
+            st.caption(f"Showing tools signed out to {shop_tech}.")
     if not checkouts:
         st.info("Nothing is checked out right now.")
     else:
         checkouts_sorted = sorted(
             checkouts, key=lambda c: c.get("checked_out_at") or "", reverse=True
         )
-        labels = {
-            c["id"]: (
+        picked_ci = str(st.session_state.get("ci_picked_id") or "")
+        ids = {c["id"] for c in checkouts_sorted}
+        if picked_ci not in ids:
+            picked_ci = checkouts_sorted[0]["id"]
+            st.session_state.ci_picked_id = picked_ci
+        for c in checkouts_sorted[:20]:
+            label = (
                 f"{c.get('tool_no')} — {c.get('tech_name')}"
-                + (f" ×{c.get('qty')}" if int(c.get("qty") or 1) > 1 else "")
-                + f"  (out {_fmt_when(c.get('checked_out_at', ''))})"
+                + (f" ×{c.get('qty')}" if int(c.get('qty') or 1) > 1 else "")
+                + f"\nRO {c.get('ro_number') or '—'} · out {_fmt_when(c.get('checked_out_at', ''))}"
             )
-            for c in checkouts_sorted
-        }
-        pick = st.selectbox(
-            "Open checkout",
-            options=list(labels.keys()),
-            format_func=lambda i: labels[i],
-            key="ci_pick",
+            if st.button(
+                label,
+                key=f"ci_pick_{c['id']}",
+                type="primary" if c["id"] == picked_ci else "secondary",
+                use_container_width=True,
+            ):
+                st.session_state.ci_picked_id = c["id"]
+                st.rerun()
+        selected_ci = next(
+            (c for c in checkouts_sorted if c["id"] == picked_ci),
+            checkouts_sorted[0],
         )
         note = st.text_input("Check-in note (optional)", key="ci_note")
-        if st.button("Check in", type="primary", use_container_width=True, key="ci_btn"):
-            ok, msg = checkin_checkout(data, pick, note=note)
+        if st.button(
+            f"Check in {selected_ci.get('tool_no')}",
+            type="primary",
+            use_container_width=True,
+            key="ci_btn",
+        ):
+            ok, msg = checkin_checkout(data, selected_ci["id"], note=note)
             if ok:
                 _persist(data)
-                st.success(msg)
+                st.session_state.pop("ci_picked_id", None)
+                _set_flash(msg)
                 st.rerun()
             else:
                 st.error(msg)

@@ -91,6 +91,10 @@ def is_manager() -> bool:
     return current_role() == ROLE_MANAGER
 
 
+def is_tech() -> bool:
+    return current_role() == ROLE_TECH
+
+
 def pages_for_role(role: str | None = None) -> List[str]:
     r = role or current_role()
     if r == ROLE_TECH:
@@ -106,6 +110,13 @@ def logout() -> None:
         "tool_room_role",
         "tool_room_admin_name",
         "tool_room_admin_username",
+        "shop_tech_name",
+        "shop_ro",
+        "co_tech",
+        "co_ro",
+        "co_picked_id",
+        "ci_picked_id",
+        "ci_only_mine",
     ):
         st.session_state.pop(key, None)
 

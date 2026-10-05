@@ -154,6 +154,14 @@ div.st-key-stat_need_order_priced button[kind="primary"] { background: rgba(245,
 div.st-key-stat_need_order_unpriced button[kind="primary"] { background: rgba(168,162,158,0.12) !important; }
 div.st-key-stat_need_order_total button[kind="primary"] { background: rgba(34,197,94,0.16) !important; }
 
+div[class*="st-key-co_pick_"] button,
+div[class*="st-key-ci_pick_"] button {
+    text-align: left !important;
+    min-height: 3.4rem !important;
+    white-space: pre-line !important;
+    line-height: 1.3 !important;
+}
+
 .status-banner {
     display: flex; align-items: center; gap: 0.65rem;
     padding: 0.75rem 1rem; border-radius: 10px; margin: 0.5rem 0 1rem;
