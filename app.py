@@ -14,11 +14,15 @@ from lib.app_auth import (
     current_admin_name,
     is_admin,
     is_manager,
-    is_tech,
     logout,
     pages_for_role,
     require_login,
 )
+try:
+    from lib.app_auth import is_tech
+except ImportError:
+    def is_tech() -> bool:
+        return str(st.session_state.get("tool_room_role") or "") == "tech"
 from lib.admin_users import (
     add_admin_user,
     load_admin_users,
