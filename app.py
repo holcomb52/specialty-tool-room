@@ -142,6 +142,37 @@ if not require_login():
     st.stop()
 
 
+def _render_desk_nav(current: str) -> None:
+    """In-page nav so the shop computer still works if the sidebar is collapsed."""
+    allowed = pages_for_role()
+    primary = [p for p in ("Check Out", "Check In", "Out Now") if p in allowed]
+    if not primary:
+        return
+    cols = st.columns(len(primary))
+    for i, name in enumerate(primary):
+        with cols[i]:
+            if st.button(
+                name,
+                key=f"desk_nav_{name.replace(' ', '_')}",
+                type="primary" if name == current else "secondary",
+                use_container_width=True,
+            ):
+                _goto_page(name)
+    if is_tech():
+        extra = [p for p in allowed if p not in primary]
+        if extra:
+            extras = st.columns(len(extra))
+            for i, name in enumerate(extra):
+                with extras[i]:
+                    if st.button(
+                        name,
+                        key=f"desk_nav_{name.replace(' ', '_')}",
+                        type="primary" if name == current else "secondary",
+                        use_container_width=True,
+                    ):
+                        _goto_page(name)
+
+
 def _goto_page(page_name: str, **prefs) -> None:
     """Navigate from a dashboard stat card (applied on next run before widgets)."""
     allowed = pages_for_role()
@@ -193,8 +224,78 @@ def _remember_checkout_desk(tech_name: str, ro_number: str) -> None:
         st.session_state.shop_ro = ro
         st.session_state.co_ro = ro
     st.session_state.co_find = ""
+    st.session_state.co_changing_tech = False
     st.session_state.pop("co_picked_id", None)
     st.session_state.pop("co_qty", None)
+
+
+def _desk_tech_name() -> str:
+    return str(st.session_state.get("shop_tech_name") or "").strip()
+
+
+def _tech_name_matches(name: str, query: str) -> bool:
+    q = str(query or "").strip().lower()
+    if not q:
+        return True
+    n = str(name).lower()
+    return n.startswith(q) or q in n or any(part.startswith(q) for part in n.split())
+
+
+def _render_desk_tech_picker(techs: list[str], *, key_prefix: str) -> str:
+    """Tap a name — never a dropdown, never default to the first person on the list."""
+    names = list(techs or [])
+    current = _desk_tech_name()
+    if current and current not in names:
+        current = ""
+        st.session_state.shop_tech_name = ""
+
+    changing = bool(st.session_state.get("co_changing_tech"))
+    if current and not changing:
+        shown, change = st.columns([3, 1])
+        with shown:
+            st.markdown(f"#### {current}")
+        with change:
+            if st.button(
+                "Not me",
+                key=f"{key_prefix}_change_tech",
+                use_container_width=True,
+            ):
+                st.session_state.shop_tech_name = ""
+                st.session_state.pop("co_tech", None)
+                st.session_state.pop(f"{key_prefix}_tech_filter", None)
+                st.session_state.co_changing_tech = True
+                st.rerun()
+        return current
+
+    st.markdown("#### Tap your name")
+    if not names:
+        typed = st.text_input("Technician name", key=f"{key_prefix}_tech_manual")
+        return str(typed or "").strip()
+
+    query = st.text_input(
+        "Type a first name to jump the list",
+        placeholder="Optional — or just tap below",
+        key=f"{key_prefix}_tech_filter",
+    )
+    matches = [name for name in names if _tech_name_matches(name, query)]
+    if not matches:
+        st.warning("No matching name. A manager can add you under Technicians.")
+        return ""
+
+    cols = st.columns(2)
+    for i, name in enumerate(matches):
+        safe = "".join(ch if ch.isalnum() else "_" for ch in name)
+        with cols[i % 2]:
+            if st.button(
+                name,
+                key=f"{key_prefix}_name_{safe}",
+                use_container_width=True,
+            ):
+                st.session_state.shop_tech_name = name
+                st.session_state.co_tech = name
+                st.session_state.co_changing_tech = False
+                st.rerun()
+    return ""
 
 
 def _start_checkout(
@@ -554,6 +655,8 @@ with st.sidebar:
         key="nav_page",
         label_visibility="collapsed",
     )
+    if is_tech():
+        st.caption("Check out, check in, look up a tool, or see who had it last.")
     st.markdown("---")
     if is_manager():
         role_label = "Manager"
@@ -582,15 +685,16 @@ with st.sidebar:
 data = _get_data()
 tool_count = len(data.get("tools") or [])
 
-st.markdown(
-    page_hero(
-        "Specialty Tool Room",
-        "Every specialty tool that leaves the room gets a name on it — and every return gets logged.",
-        tag="Live" if tool_count else "Import Needed",
-        tag_style="live" if tool_count else "warn",
-    ),
-    unsafe_allow_html=True,
-)
+if page not in ("Check Out", "Check In"):
+    st.markdown(
+        page_hero(
+            "Specialty Tool Room",
+            "Every specialty tool that leaves the room gets a name on it — and every return gets logged.",
+            tag="Live" if tool_count else "Import Needed",
+            tag_style="live" if tool_count else "warn",
+        ),
+        unsafe_allow_html=True,
+    )
 
 if data.get("_load_error"):
     st.markdown(
@@ -608,6 +712,9 @@ if st.session_state.get("_sync_error"):
         ),
         unsafe_allow_html=True,
     )
+
+if is_tech() or page in ("Check Out", "Check In"):
+    _render_desk_nav(page)
 
 if page not in ("Check Out", "Check In"):
     stats = inventory_stats(data)
@@ -767,199 +874,194 @@ if page == "Check Out":
 
     _show_flash()
     st.markdown("##### Check out a tool")
-    st.caption(
-        "Set your name and RO once. Search, tap the tool, then check it out. "
-        "Name and RO stay filled so the next tool on this job is faster."
-    )
     techs = _tech_names()
-    if techs and "co_tech" not in st.session_state:
-        remembered = str(st.session_state.get("shop_tech_name") or "")
-        if remembered in techs:
-            st.session_state.co_tech = remembered
-    if "co_ro" not in st.session_state and st.session_state.get("shop_ro"):
-        st.session_state.co_ro = str(st.session_state.get("shop_ro") or "")
-
-    a1, a2 = st.columns(2)
-    with a1:
-        if techs:
-            tech = st.selectbox("Who is taking it?", options=techs, key="co_tech")
-        else:
-            tech = st.text_input("Technician name", key="co_tech_manual")
-            st.caption("Add names under Technicians for a dropdown.")
-    with a2:
+    tech = _render_desk_tech_picker(techs, key_prefix="co")
+    if not tech:
+        st.caption("After your name, you’ll enter the RO and tap the tool.")
+    else:
+        if "co_ro" not in st.session_state and st.session_state.get("shop_ro"):
+            st.session_state.co_ro = str(st.session_state.get("shop_ro") or "")
         ro = st.text_input("RO #", key="co_ro", placeholder="Required")
-    note = st.text_input("Note (optional)", key="co_note")
+        with st.expander("Note (optional)"):
+            note = st.text_input("Note", key="co_note", label_visibility="collapsed")
+        note = str(st.session_state.get("co_note") or "")
 
-    find = st.text_input(
-        "Find tool # or description",
-        placeholder="e.g. C-4150 or ball joint",
-        key="co_find",
-        on_change=_force_upper,
-        args=("co_find",),
-    )
-    tools = search_tools(data, find, status="active")
-    available = [
-        t
-        for t in tools
-        if t.get("qty_available", 0) > 0
-        and normalize_accountability(t.get("accountability"))
-        not in (ACCOUNTABILITY_UNACCOUNTED, ACCOUNTABILITY_PART_ORDERED)
-    ]
-    available.sort(key=lambda t: _checkout_match_rank(t, find))
-    shown = available[:12]
-    if not find.strip():
-        st.caption("Type a tool number or keyword. Matches appear as tap buttons below.")
-    elif shown:
-        st.caption(
-            f"{len(available)} available — tap the right tool, then Check out."
-            + (" Refine the search to see more." if len(available) > 12 else "")
+        find = st.text_input(
+            "Find tool # or description",
+            placeholder="e.g. C-4150 or ball joint",
+            key="co_find",
+            on_change=_force_upper,
+            args=("co_find",),
         )
-        picked_id = str(st.session_state.get("co_picked_id") or "")
-        if picked_id and picked_id not in {t["id"] for t in shown}:
-            picked_id = shown[0]["id"]
-            st.session_state.co_picked_id = picked_id
-        elif not picked_id:
-            picked_id = shown[0]["id"]
-            st.session_state.co_picked_id = picked_id
-        for t in shown:
-            loc = str(t.get("location") or "").strip()
-            label = (
-                f"{t.get('tool_no')} — {t.get('description')}"
-                + (f"\n{loc}" if loc else "")
-                + f"  ·  {t.get('qty_available')} avail"
-            )
-            if st.button(
-                label,
-                key=f"co_pick_{t['id']}",
-                type="primary" if t["id"] == picked_id else "secondary",
-                use_container_width=True,
-            ):
-                st.session_state.co_picked_id = t["id"]
-                st.rerun()
-        selected = next((t for t in shown if t["id"] == picked_id), shown[0])
-        max_qty = int(selected.get("qty_available") or 1)
-        qty = 1
-        if max_qty > 1:
-            qty = st.number_input(
-                "Qty", min_value=1, max_value=max_qty, value=1, key="co_qty"
-            )
-        st.markdown(
-            f"**Selected:** {selected.get('tool_no')} — {selected.get('description')}"
-        )
-        if st.button(
-            f"Check out {selected.get('tool_no')}",
-            type="primary",
-            use_container_width=True,
-            key="co_btn",
-        ):
-            _start_checkout(
-                data,
-                selected["id"],
-                str(tech or ""),
-                qty=int(qty),
-                note=str(note or ""),
-                ro_number=str(ro or ""),
-            )
-    elif find.strip():
-        blocked = [
+        tools = search_tools(data, find, status="active")
+        available = [
             t
             for t in tools
-            if t.get("id") not in {a["id"] for a in available}
+            if t.get("qty_available", 0) > 0
+            and normalize_accountability(t.get("accountability"))
+            not in (ACCOUNTABILITY_UNACCOUNTED, ACCOUNTABILITY_PART_ORDERED)
         ]
-        if blocked:
-            first = blocked[0]
-            acct = normalize_accountability(first.get("accountability"))
-            if first.get("qty_available", 0) <= 0:
-                st.warning(
-                    f"{first.get('tool_no')} is already signed out. Check it in first."
+        available.sort(key=lambda t: _checkout_match_rank(t, find))
+        shown = available[:12]
+        if not find.strip():
+            st.caption("Type a tool number or keyword. Matches appear as tap buttons below.")
+        elif shown:
+            st.caption(
+                f"{len(available)} available — tap the right tool, then Check out."
+                + (" Refine the search to see more." if len(available) > 12 else "")
+            )
+            picked_id = str(st.session_state.get("co_picked_id") or "")
+            if picked_id and picked_id not in {t["id"] for t in shown}:
+                picked_id = shown[0]["id"]
+                st.session_state.co_picked_id = picked_id
+            elif not picked_id:
+                picked_id = shown[0]["id"]
+                st.session_state.co_picked_id = picked_id
+            for t in shown:
+                loc = str(t.get("location") or "").strip()
+                label = (
+                    f"{t.get('tool_no')} — {t.get('description')}"
+                    + (f"\n{loc}" if loc else "")
+                    + f"  ·  {t.get('qty_available')} avail"
                 )
-            elif acct == ACCOUNTABILITY_UNACCOUNTED:
-                st.warning(
-                    f"{first.get('tool_no')} is on the Need to order list — not in the room."
+                if st.button(
+                    label,
+                    key=f"co_pick_{t['id']}",
+                    type="primary" if t["id"] == picked_id else "secondary",
+                    use_container_width=True,
+                ):
+                    st.session_state.co_picked_id = t["id"]
+                    st.rerun()
+            selected = next((t for t in shown if t["id"] == picked_id), shown[0])
+            max_qty = int(selected.get("qty_available") or 1)
+            qty = 1
+            if max_qty > 1:
+                qty = st.number_input(
+                    "Qty", min_value=1, max_value=max_qty, value=1, key="co_qty"
                 )
-            elif acct == ACCOUNTABILITY_PART_ORDERED:
-                st.warning(f"{first.get('tool_no')} is on order and not in yet.")
+            st.markdown(
+                f"**Selected:** {selected.get('tool_no')} — {selected.get('description')}"
+            )
+            if st.button(
+                f"Check out {selected.get('tool_no')}",
+                type="primary",
+                use_container_width=True,
+                key="co_btn",
+            ):
+                _start_checkout(
+                    data,
+                    selected["id"],
+                    str(tech or ""),
+                    qty=int(qty),
+                    note=str(note or ""),
+                    ro_number=str(ro or ""),
+                )
+        elif find.strip():
+            blocked = [
+                t
+                for t in tools
+                if t.get("id") not in {a["id"] for a in available}
+            ]
+            if blocked:
+                first = blocked[0]
+                acct = normalize_accountability(first.get("accountability"))
+                if first.get("qty_available", 0) <= 0:
+                    st.warning(
+                        f"{first.get('tool_no')} is already signed out. Check it in first."
+                    )
+                elif acct == ACCOUNTABILITY_UNACCOUNTED:
+                    st.warning(
+                        f"{first.get('tool_no')} is on the Need to order list — not in the room."
+                    )
+                elif acct == ACCOUNTABILITY_PART_ORDERED:
+                    st.warning(f"{first.get('tool_no')} is on order and not in yet.")
+                else:
+                    st.info("No available tools match that search.")
             else:
                 st.info("No available tools match that search.")
-        else:
-            st.info("No available tools match that search.")
 
 elif page == "Check In":
     _show_flash()
     st.markdown("##### Check in a tool")
-    checkouts = list(data.get("active_checkouts") or [])
-    shop_tech = str(st.session_state.get("shop_tech_name") or "").strip()
-    if shop_tech and checkouts:
-        mine = checkouts_for_technician(data, shop_tech)
-        show_mine = bool(st.session_state.get("ci_only_mine", is_tech() and bool(mine)))
-        if "ci_only_mine" not in st.session_state:
-            st.session_state.ci_only_mine = show_mine
-        b1, b2 = st.columns(2)
-        with b1:
-            if st.button(
-                f"My tools ({len(mine)})",
-                key="ci_filter_mine",
-                type="primary" if st.session_state.ci_only_mine else "secondary",
-                use_container_width=True,
-            ):
-                st.session_state.ci_only_mine = True
-                st.rerun()
-        with b2:
-            if st.button(
-                f"Everyone ({len(checkouts)})",
-                key="ci_filter_all",
-                type="primary" if not st.session_state.ci_only_mine else "secondary",
-                use_container_width=True,
-            ):
-                st.session_state.ci_only_mine = False
-                st.rerun()
-        if st.session_state.ci_only_mine:
-            checkouts = mine
-            st.caption(f"Showing tools signed out to {shop_tech}.")
-    if not checkouts:
-        st.info("Nothing is checked out right now.")
+    tech = _render_desk_tech_picker(_tech_names(), key_prefix="ci")
+    if not tech and is_tech():
+        st.caption("Tap your name to see the tools you have out.")
     else:
-        checkouts_sorted = sorted(
-            checkouts, key=lambda c: c.get("checked_out_at") or "", reverse=True
-        )
-        picked_ci = str(st.session_state.get("ci_picked_id") or "")
-        ids = {c["id"] for c in checkouts_sorted}
-        if picked_ci not in ids:
-            picked_ci = checkouts_sorted[0]["id"]
-            st.session_state.ci_picked_id = picked_ci
-        for c in checkouts_sorted[:20]:
-            label = (
-                f"{c.get('tool_no')} — {c.get('tech_name')}"
-                + (f" ×{c.get('qty')}" if int(c.get('qty') or 1) > 1 else "")
-                + f"\nRO {c.get('ro_number') or '—'} · out {_fmt_when(c.get('checked_out_at', ''))}"
+        checkouts = list(data.get("active_checkouts") or [])
+        shop_tech = tech
+        if shop_tech and checkouts:
+            mine = checkouts_for_technician(data, shop_tech)
+            show_mine = bool(
+                st.session_state.get("ci_only_mine", is_tech() and bool(mine))
             )
+            if "ci_only_mine" not in st.session_state:
+                st.session_state.ci_only_mine = show_mine
+            b1, b2 = st.columns(2)
+            with b1:
+                if st.button(
+                    f"My tools ({len(mine)})",
+                    key="ci_filter_mine",
+                    type="primary" if st.session_state.ci_only_mine else "secondary",
+                    use_container_width=True,
+                ):
+                    st.session_state.ci_only_mine = True
+                    st.rerun()
+            with b2:
+                if st.button(
+                    f"Everyone ({len(checkouts)})",
+                    key="ci_filter_all",
+                    type="primary" if not st.session_state.ci_only_mine else "secondary",
+                    use_container_width=True,
+                ):
+                    st.session_state.ci_only_mine = False
+                    st.rerun()
+            if st.session_state.ci_only_mine:
+                checkouts = mine
+                st.caption(f"Showing tools signed out to {shop_tech}.")
+        if not checkouts:
+            st.info("Nothing is checked out right now.")
+        else:
+            checkouts_sorted = sorted(
+                checkouts, key=lambda c: c.get("checked_out_at") or "", reverse=True
+            )
+            picked_ci = str(st.session_state.get("ci_picked_id") or "")
+            ids = {c["id"] for c in checkouts_sorted}
+            if picked_ci not in ids:
+                picked_ci = checkouts_sorted[0]["id"]
+                st.session_state.ci_picked_id = picked_ci
+            for c in checkouts_sorted[:20]:
+                label = (
+                    f"{c.get('tool_no')} — {c.get('tech_name')}"
+                    + (f" ×{c.get('qty')}" if int(c.get('qty') or 1) > 1 else "")
+                    + f"\nRO {c.get('ro_number') or '—'} · out {_fmt_when(c.get('checked_out_at', ''))}"
+                )
+                if st.button(
+                    label,
+                    key=f"ci_pick_{c['id']}",
+                    type="primary" if c["id"] == picked_ci else "secondary",
+                    use_container_width=True,
+                ):
+                    st.session_state.ci_picked_id = c["id"]
+                    st.rerun()
+            selected_ci = next(
+                (c for c in checkouts_sorted if c["id"] == picked_ci),
+                checkouts_sorted[0],
+            )
+            note = st.text_input("Check-in note (optional)", key="ci_note")
             if st.button(
-                label,
-                key=f"ci_pick_{c['id']}",
-                type="primary" if c["id"] == picked_ci else "secondary",
+                f"Check in {selected_ci.get('tool_no')}",
+                type="primary",
                 use_container_width=True,
+                key="ci_btn",
             ):
-                st.session_state.ci_picked_id = c["id"]
-                st.rerun()
-        selected_ci = next(
-            (c for c in checkouts_sorted if c["id"] == picked_ci),
-            checkouts_sorted[0],
-        )
-        note = st.text_input("Check-in note (optional)", key="ci_note")
-        if st.button(
-            f"Check in {selected_ci.get('tool_no')}",
-            type="primary",
-            use_container_width=True,
-            key="ci_btn",
-        ):
-            ok, msg = checkin_checkout(data, selected_ci["id"], note=note)
-            if ok:
-                _persist(data)
-                st.session_state.pop("ci_picked_id", None)
-                _set_flash(msg)
-                st.rerun()
-            else:
-                st.error(msg)
+                ok, msg = checkin_checkout(data, selected_ci["id"], note=note)
+                if ok:
+                    _persist(data)
+                    st.session_state.pop("ci_picked_id", None)
+                    _set_flash(msg)
+                    st.rerun()
+                else:
+                    st.error(msg)
 
 elif page == "Out Now":
     checkouts = list(data.get("active_checkouts") or [])

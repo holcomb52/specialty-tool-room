@@ -2,8 +2,22 @@ CUSTOM_CSS = """
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700;800&family=Source+Sans+3:wght@400;500;600;700&display=swap');
 
-#MainMenu, footer, header[data-testid="stHeader"] {visibility: hidden; height: 0;}
-.stDeployButton {display: none;}
+#MainMenu, footer {visibility: hidden; height: 0;}
+.stDeployButton, [data-testid="stToolbar"], [data-testid="stStatusWidget"] {display: none !important;}
+header[data-testid="stHeader"] {
+    background: transparent !important;
+}
+/* If the sidebar is collapsed, keep the reopen control visible (shop PC). */
+[data-testid="stSidebarCollapsedControl"],
+[data-testid="collapsedControl"] {
+    display: flex !important;
+    visibility: visible !important;
+    opacity: 1 !important;
+    position: fixed !important;
+    left: 0.5rem !important;
+    top: 0.5rem !important;
+    z-index: 999999 !important;
+}
 
 html, body, [class*="css"] {
     font-family: 'Source Sans 3', sans-serif;
@@ -35,6 +49,11 @@ html, body, [class*="css"] {
 section[data-testid="stSidebar"] {
     background: linear-gradient(180deg, #1c1917, #0c0a09) !important;
     border-right: 1px solid rgba(245, 158, 11, 0.18);
+}
+section[data-testid="stSidebar"] [data-testid="stRadio"] label {
+    font-size: 1.02rem !important;
+    min-height: 1.9rem !important;
+    padding: 0.2rem 0 !important;
 }
 
 .brand-block { padding: 0.4rem 0 1rem; }
@@ -160,6 +179,19 @@ div[class*="st-key-ci_pick_"] button {
     min-height: 3.4rem !important;
     white-space: pre-line !important;
     line-height: 1.3 !important;
+}
+
+div[class*="st-key-co_name_"] button,
+div[class*="st-key-ci_name_"] button {
+    min-height: 3.1rem !important;
+    font-size: 1.05rem !important;
+    font-weight: 650 !important;
+}
+
+div[class*="st-key-desk_nav_"] button {
+    min-height: 2.7rem !important;
+    font-size: 0.95rem !important;
+    font-weight: 700 !important;
 }
 
 .status-banner {

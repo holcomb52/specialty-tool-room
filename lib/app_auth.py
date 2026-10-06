@@ -46,8 +46,6 @@ TECH_PAGES = [
     "Check In",
     "Out Now",
     "Catalog",
-    "Replacement Costs",
-    "Reports",
     "History",
 ]
 
@@ -117,6 +115,9 @@ def logout() -> None:
         "co_picked_id",
         "ci_picked_id",
         "ci_only_mine",
+        "co_changing_tech",
+        "co_tech_filter",
+        "ci_tech_filter",
     ):
         st.session_state.pop(key, None)
 
