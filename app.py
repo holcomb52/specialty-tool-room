@@ -45,12 +45,14 @@ from lib.specialty_tools_storage import (
     all_open_checkout_report_rows,
     apply_inventory_mark,
     checkin_checkout,
+    checkout_report_rows,
     checkout_tool,
     checkouts_for_technician,
     clear_inventory_mark,
     days_checked_out,
     delete_tool,
     dismiss_overdue_alert,
+    ensure_checkout_ids,
     find_tool,
     inventory_count_rows,
     inventory_count_stats,
@@ -62,6 +64,7 @@ from lib.specialty_tools_storage import (
     normalize_accountability,
     qty_out,
     receive_ordered_part,
+    repair_checkout_ids,
     replace_tools_from_import,
     returned_tool_report_rows,
     save_inventory,
@@ -494,11 +497,14 @@ def _get_data():
         _ok, err = save_inventory(pending)
         if err:
             st.session_state["_sync_error"] = err
+            ensure_checkout_ids(pending)
             return pending
         st.session_state.pop("_sync_error", None)
         st.session_state.specialty_tools_data = pending
+        ensure_checkout_ids(pending)
         return pending
     data = load_inventory()
+    ensure_checkout_ids(data)
     st.session_state.specialty_tools_data = data
     return data
 
@@ -1018,6 +1024,10 @@ elif page == "Check In":
             if st.session_state.ci_only_mine:
                 checkouts = mine
                 st.caption(f"Showing tools signed out to {shop_tech}.")
+        # My tools comes from checkouts_for_technician, which must be the stored
+        # checkout records. Report rows used to omit "id" and this set crashed
+        # the page (KeyError) for every technician on the default tab.
+        checkouts = repair_checkout_ids(list(checkouts))
         if not checkouts:
             st.info("Nothing is checked out right now.")
         else:
@@ -1064,7 +1074,7 @@ elif page == "Check In":
                     st.error(msg)
 
 elif page == "Out Now":
-    checkouts = list(data.get("active_checkouts") or [])
+    checkouts = repair_checkout_ids(list(data.get("active_checkouts") or []))
     overdue_only = bool(st.session_state.get("out_now_overdue_only"))
     if overdue_only:
         checkouts = [c for c in checkouts if days_checked_out(c) >= OVERDUE_AFTER_DAYS]
@@ -2907,7 +2917,7 @@ elif page == "Reports":
                     index=default_idx,
                     key="report_tech",
                 )
-                rows_raw = checkouts_for_technician(data, tech)
+                rows_raw = checkout_report_rows(checkouts_for_technician(data, tech))
                 pdf_title = f"Technician Checkout Report — {tech}"
                 pdf_subtitle = "Active tools signed out to this technician"
                 pdf_name = f"tech-checkout-{tech.lower().replace(' ', '-')}.pdf"

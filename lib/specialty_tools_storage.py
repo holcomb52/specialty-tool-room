@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import uuid
 from datetime import date, datetime, timezone
@@ -135,9 +136,15 @@ def checkout_report_rows(
     """Normalize active checkouts into report table rows."""
     rows: List[Dict[str, Any]] = []
     for checkout in checkouts:
+        if not isinstance(checkout, dict):
+            continue
         start = str(checkout.get("checked_out_at") or "")
         rows.append(
             {
+                # Keep id/tool_id. Check In used to treat these rows as checkout
+                # records and crashed with KeyError when "id" was omitted.
+                "id": str(checkout.get("id") or ""),
+                "tool_id": str(checkout.get("tool_id") or ""),
                 "tool_no": checkout.get("tool_no", ""),
                 "description": checkout.get("description", ""),
                 "tech_name": checkout.get("tech_name", ""),
@@ -220,7 +227,9 @@ def last_checkout_tech(
         return False
 
     open_matches = [
-        c for c in (data.get("active_checkouts") or []) if _matches(c)
+        c
+        for c in (data.get("active_checkouts") or [])
+        if isinstance(c, dict) and _matches(c)
     ]
     if open_matches:
         open_matches.sort(
@@ -242,26 +251,106 @@ def last_checkout_tech(
     return ""
 
 
+def _stable_missing_checkout_id(checkout: Dict[str, Any]) -> str:
+    """Deterministic id for a checkout row that was stored without one.
+
+    Streamlit reruns the script on every click and reloads inventory. A random
+    uuid would change between the render that drew the button and the rerun
+    that handles the click, so check-in would miss the tool. Hashing the
+    stored fields keeps the id stable even before it is saved.
+    """
+    raw = "\x1f".join(
+        str(checkout.get(key) or "")
+        for key in (
+            "tool_id",
+            "tool_no",
+            "description",
+            "tech_name",
+            "qty",
+            "checked_out_at",
+            "ro_number",
+            "note",
+        )
+    )
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
+    return f"repaired-{digest}"
+
+
+def repair_checkout_ids(checkouts: List[Any]) -> List[Dict[str, Any]]:
+    """Return checkout dicts, assigning a stable id where ``id`` is missing.
+
+    Mutates the original dicts so check-in can find the same row. Non-dict
+    entries are skipped. Identical rows missing an id get distinct suffixes
+    so two tools are not collapsed onto one button.
+    """
+    if not isinstance(checkouts, list):
+        return []
+    dicts = [c for c in checkouts if isinstance(c, dict)]
+    seen = {
+        str(c.get("id")).strip()
+        for c in dicts
+        if str(c.get("id") or "").strip()
+    }
+    ready: List[Dict[str, Any]] = []
+    for checkout in dicts:
+        existing = str(checkout.get("id") or "").strip()
+        if not existing:
+            candidate = _stable_missing_checkout_id(checkout)
+            unique = candidate
+            n = 1
+            while unique in seen:
+                n += 1
+                unique = f"{candidate}-{n}"
+            checkout["id"] = unique
+            existing = unique
+            seen.add(existing)
+        ready.append(checkout)
+    return ready
+
+
+def ensure_checkout_ids(data: Dict[str, Any] | None) -> List[Dict[str, Any]]:
+    """Repair ``active_checkouts`` in place. Safe to call on every load."""
+    if not isinstance(data, dict):
+        return []
+    checkouts = data.get("active_checkouts")
+    if not isinstance(checkouts, list):
+        return []
+    return repair_checkout_ids(checkouts)
+
+
 def checkouts_for_technician(
     data: Dict[str, Any], tech_name: str
 ) -> List[Dict[str, Any]]:
-    """Active checkouts for one technician, longest out first."""
+    """Stored checkout records for one technician, longest out first.
+
+    These are the same dicts as ``active_checkouts`` (including ``id``), not
+    report rows. ``checkout_report_rows`` builds a display projection and used
+    to drop ``id``. Check In's My tools tab passed that projection into
+    ``{c["id"] for c in ...}`` and the page died with KeyError even though
+    every stored checkout had an id.
+    """
     needle = str(tech_name or "").strip().lower()
     if not needle:
         return []
+    ensure_checkout_ids(data)
     matched = [
         c
         for c in data.get("active_checkouts") or []
-        if str(c.get("tech_name") or "").strip().lower() == needle
+        if isinstance(c, dict)
+        and str(c.get("tech_name") or "").strip().lower() == needle
     ]
-    return checkout_report_rows(matched)
+    matched.sort(
+        key=lambda c: (days_checked_out(c), str(c.get("checked_out_at") or "")),
+        reverse=True,
+    )
+    return matched
 
 
 def technicians_with_open_checkouts(data: Dict[str, Any]) -> List[str]:
     names = {
         str(c.get("tech_name") or "").strip()
         for c in data.get("active_checkouts") or []
-        if str(c.get("tech_name") or "").strip()
+        if isinstance(c, dict) and str(c.get("tech_name") or "").strip()
     }
     return sorted(names, key=lambda n: (n.split()[0].lower() if n.split() else n.lower(), n.lower()))
 
@@ -288,8 +377,11 @@ def list_overdue_checkouts(
     today: Optional[date] = None,
 ) -> List[Dict[str, Any]]:
     """Active checkouts out for `days` or more that are not snoozed."""
+    ensure_checkout_ids(data)
     overdue: List[Dict[str, Any]] = []
     for checkout in data.get("active_checkouts") or []:
+        if not isinstance(checkout, dict):
+            continue
         out_days = days_checked_out(checkout)
         if out_days < days:
             continue
@@ -323,7 +415,7 @@ def dismiss_overdue_alert(
         return False, "Pick a future date to dismiss the alert until."
 
     for checkout in data.get("active_checkouts") or []:
-        if checkout.get("id") == checkout_id:
+        if isinstance(checkout, dict) and checkout.get("id") == checkout_id:
             checkout["alert_dismissed_until"] = until_date.isoformat()
             tool_no = checkout.get("tool_no") or "tool"
             return True, f"Alert for {tool_no} hidden until {until_date.strftime('%m/%d/%Y')}."
@@ -345,6 +437,7 @@ def _normalize(data: Dict[str, Any] | None) -> Dict[str, Any]:
     base["tools"] = list(tools) if isinstance(tools, list) else []
     base["active_checkouts"] = list(checkouts) if isinstance(checkouts, list) else []
     base["history"] = list(history) if isinstance(history, list) else []
+    ensure_checkout_ids(base)
     return base
 
 
@@ -529,7 +622,7 @@ def qty_out(data: Dict[str, Any], tool_id: str) -> int:
     return sum(
         int(c.get("qty") or 1)
         for c in data.get("active_checkouts") or []
-        if c.get("tool_id") == tool_id
+        if isinstance(c, dict) and c.get("tool_id") == tool_id
     )
 
 
@@ -625,7 +718,7 @@ def checkin_checkout(data: Dict[str, Any], checkout_id: str, note: str = "") -> 
     match = None
     remaining = []
     for item in checkouts:
-        if item.get("id") == checkout_id and match is None:
+        if isinstance(item, dict) and item.get("id") == checkout_id and match is None:
             match = item
         else:
             remaining.append(item)
@@ -666,7 +759,7 @@ def update_checkout(
     checkouts = list(data.get("active_checkouts") or [])
     match = None
     for item in checkouts:
-        if item.get("id") == checkout_id:
+        if isinstance(item, dict) and item.get("id") == checkout_id:
             match = item
             break
     if not match:
@@ -792,7 +885,7 @@ def delete_tool(
     open_checkouts = [
         c
         for c in data.get("active_checkouts") or []
-        if str(c.get("tool_id") or "") == str(tool_id)
+        if isinstance(c, dict) and str(c.get("tool_id") or "") == str(tool_id)
     ]
     if open_checkouts and not force:
         who = ", ".join(
@@ -821,7 +914,7 @@ def delete_tool(
         data["active_checkouts"] = [
             c
             for c in data.get("active_checkouts") or []
-            if str(c.get("tool_id") or "") != str(tool_id)
+            if not isinstance(c, dict) or str(c.get("tool_id") or "") != str(tool_id)
         ]
 
     who = str(deleted_by or "").strip()
@@ -1116,6 +1209,8 @@ def replace_tools_from_import(
         }
         preserved = []
         for checkout in data.get("active_checkouts") or []:
+            if not isinstance(checkout, dict):
+                continue
             key = str(checkout.get("tool_no") or "").strip().lower()
             tool = by_no.get(key)
             if not tool:
@@ -1177,8 +1272,10 @@ def inventory_stats(data: Dict[str, Any]) -> Dict[str, int]:
         "total": len(tools),
         "active": sum(1 for t in tools if t.get("status") == "active"),
         "non_current": sum(1 for t in tools if t.get("status") == "non_current"),
-        "out_now": len(checkouts),
-        "units_out": sum(int(c.get("qty") or 1) for c in checkouts),
+        "out_now": sum(1 for c in checkouts if isinstance(c, dict)),
+        "units_out": sum(
+            int(c.get("qty") or 1) for c in checkouts if isinstance(c, dict)
+        ),
         "with_location": sum(
             1
             for t in tools
@@ -1255,7 +1352,11 @@ def search_tools(
 ) -> List[Dict[str, Any]]:
     q = str(query or "").strip().lower()
     loc_filter = str(location or "").strip().lower()
-    out_ids = {c.get("tool_id") for c in data.get("active_checkouts") or []}
+    out_ids = {
+        c.get("tool_id")
+        for c in data.get("active_checkouts") or []
+        if isinstance(c, dict)
+    }
     results = []
     for tool in data.get("tools") or []:
         if status != "all" and tool.get("status") != status:
@@ -1331,7 +1432,7 @@ def _open_checkouts_for_tool(
     return [
         c
         for c in data.get("active_checkouts") or []
-        if str(c.get("tool_id") or "") == tid
+        if isinstance(c, dict) and str(c.get("tool_id") or "") == tid
     ]
 
 
