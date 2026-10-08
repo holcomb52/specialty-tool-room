@@ -15,6 +15,7 @@ from lib.specialty_tools_storage import (
     add_tool,
     checkin_checkout,
     checkout_tool,
+    checkouts_for_technician,
     delete_tool,
     dismiss_overdue_alert,
     find_tool,
@@ -133,6 +134,7 @@ def test_report_rows_and_pdf():
     from lib.reports_pdf import build_checkout_report_pdf
     from lib.specialty_tools_storage import (
         all_open_checkout_report_rows,
+        checkout_report_rows,
         checkouts_for_technician,
         returned_tool_report_rows,
     )
@@ -152,6 +154,11 @@ def test_report_rows_and_pdf():
 
     tech_rows = checkouts_for_technician(data, "Dale Potts")
     assert len(tech_rows) == 1
+    assert tech_rows[0] is data["active_checkouts"][0]
+    assert tech_rows[0]["id"]
+    tech_report = checkout_report_rows(tech_rows)
+    assert tech_report[0]["id"] == tech_rows[0]["id"]
+    assert tech_report[0]["signed_in"] == "Still out"
 
     cid = data["active_checkouts"][0]["id"]
     ok, msg = checkin_checkout(data, cid)
@@ -167,6 +174,124 @@ def test_report_rows_and_pdf():
         summary=[("Tools signed out", "1")],
     )
     assert pdf.startswith(b"%PDF")
+
+
+def test_check_in_my_tools_keeps_checkout_id():
+    """Check In crashed with KeyError when My tools was selected.
+
+    The live screen (Charles Hinxman, My tools (1), Everyone (3)) built
+    ``ids = {c["id"] for c in checkouts_sorted}`` from
+    ``checkouts_for_technician()``. That helper returned report rows, which
+    omitted ``id``, so the page died even though every stored checkout had one.
+    """
+    data = {
+        "tools": [],
+        "active_checkouts": [],
+        "history": [],
+        "source": "",
+        "version": 1,
+    }
+    ok, msg, tool = add_tool(
+        data, tool_no="T-HINX", description="HINGE TOOL", quantity=2
+    )
+    assert ok, msg
+    ok, msg = checkout_tool(
+        data, tool["id"], "Charles Hinxman", qty=1, ro_number="RO-1"
+    )
+    assert ok, msg
+    ok, msg = checkout_tool(data, tool["id"], "Dale Potts", qty=1, ro_number="RO-2")
+    assert ok, msg
+
+    stored = next(
+        c for c in data["active_checkouts"] if c["tech_name"] == "Charles Hinxman"
+    )
+    mine = checkouts_for_technician(data, "Charles Hinxman")
+    assert len(mine) == 1
+    assert mine[0] is stored
+    # This is the line that raised KeyError in production.
+    ids = {c["id"] for c in mine}
+    assert ids == {stored["id"]}
+
+    ok, msg = checkin_checkout(data, stored["id"])
+    assert ok, msg
+    assert checkouts_for_technician(data, "Charles Hinxman") == []
+    assert len(data["active_checkouts"]) == 1
+
+
+def test_checkout_missing_id_is_repaired_and_still_checkable():
+    """A checkout stored without id is shown and can be checked in.
+
+    The id is derived from the row, so a rerun that reloads the same unsaved
+    repair still matches the button the technician tapped.
+    """
+    from lib.specialty_tools_storage import (
+        _normalize,
+        checkout_report_rows,
+        repair_checkout_ids,
+    )
+
+    old = (datetime.now(timezone.utc) - timedelta(days=6)).isoformat()
+    fields = {
+        "tool_id": "tool-1",
+        "tool_no": "T-NOID",
+        "description": "NO ID TOOL",
+        "tech_name": "Charles Hinxman",
+        "qty": 1,
+        "checked_out_at": old,
+        "ro_number": "RO-NOID",
+        "note": "",
+    }
+    data = {
+        "tools": [],
+        "active_checkouts": [dict(fields), dict(fields), "not-a-checkout"],
+        "history": [],
+        "source": "",
+        "version": 1,
+    }
+
+    loaded = _normalize(data)
+    assert loaded["active_checkouts"][0]["id"].startswith("repaired-")
+    assert loaded["active_checkouts"][0]["id"] != loaded["active_checkouts"][1]["id"]
+
+    mine = checkouts_for_technician(data, "Charles Hinxman")
+    ids = {c["id"] for c in mine}
+    assert len(mine) == 2
+    assert len(ids) == 2
+    assert mine[0] is data["active_checkouts"][0]
+    assert mine[1] is data["active_checkouts"][1]
+
+    stamped = [c["id"] for c in mine]
+    for checkout in data["active_checkouts"]:
+        if isinstance(checkout, dict):
+            checkout.pop("id", None)
+    assert [c["id"] for c in checkouts_for_technician(data, "Charles Hinxman")] == stamped
+
+    # Out Now keys its correction dropdown by checkout id.
+    labels = {c["id"]: c.get("tool_no") for c in repair_checkout_ids(list(data["active_checkouts"]))}
+    assert set(labels) == set(stamped)
+
+    report_rows = checkout_report_rows(mine)
+    assert [r["id"] for r in report_rows] == stamped
+    assert report_rows[0]["signed_in"] == "Still out"
+
+    overdue = list_overdue_checkouts(data)
+    assert {item["id"] for item in overdue} == set(stamped)
+
+    today = date.today()
+    ok, msg = dismiss_overdue_alert(
+        data, stamped[0], today + timedelta(days=3), today=today
+    )
+    assert ok, msg
+    assert [item["id"] for item in list_overdue_checkouts(data, today=today)] == [
+        stamped[1]
+    ]
+
+    ok, msg = checkin_checkout(data, stamped[0])
+    assert ok, msg
+    ok, msg = checkin_checkout(data, stamped[1])
+    assert ok, msg
+    assert [c for c in data["active_checkouts"] if isinstance(c, dict)] == []
+    assert data["active_checkouts"] == ["not-a-checkout"]
 
 
 def test_inventory_missing_goes_unaccounted_and_signed_out_blocks_mark():
