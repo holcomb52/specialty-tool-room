@@ -3032,30 +3032,56 @@ elif page == "Reports":
                 )
 
 elif page == "History":
-    history = list(data.get("history") or [])[:80]
-    if not history:
+    st.markdown("##### History")
+    find = st.text_input(
+        "Find a tool",
+        placeholder="Tool # or description — e.g. S-P2551 or dipstick",
+        key="hist_find",
+    )
+    query = str(find or "").strip().lower()
+    history_all = list(data.get("history") or [])
+    if not history_all:
         st.info("No activity yet.")
     else:
-        last_tech_cache: dict[str, str] = {}
-        rows = []
-        for h in history:
-            cache_key = str(h.get("tool_id") or "") or str(h.get("tool_no") or "")
-            if cache_key not in last_tech_cache:
-                last_tech_cache[cache_key] = last_checkout_tech(
-                    data,
-                    tool_id=str(h.get("tool_id") or ""),
-                    tool_no=str(h.get("tool_no") or ""),
-                )
-            rows.append(
-                {
-                    "When": _fmt_when(h.get("at", "")),
-                    "Action": h.get("action", ""),
-                    "Tool #": h.get("tool_no", ""),
-                    "Description": h.get("description", ""),
-                    "Tech": h.get("tech_name", ""),
-                    "Last out to": last_tech_cache[cache_key],
-                    "Qty": h.get("qty", ""),
-                    "Note": h.get("note", ""),
-                }
+        if query:
+            history = [
+                h
+                for h in history_all
+                if query in str(h.get("tool_no") or "").lower()
+                or query in str(h.get("description") or "").lower()
+            ]
+            history.sort(key=lambda h: str(h.get("at") or ""), reverse=True)
+            if not history:
+                st.info("No history matches that tool # or description.")
+            else:
+                st.caption(f"{len(history)} matching event(s).")
+        else:
+            history = history_all[:80]
+            st.caption(
+                "Showing the latest activity. Search a tool # or description to jump to one."
             )
-        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+        if history:
+            last_tech_cache: dict[str, str] = {}
+            rows = []
+            for h in history:
+                cache_key = str(h.get("tool_id") or "") or str(h.get("tool_no") or "")
+                if cache_key not in last_tech_cache:
+                    last_tech_cache[cache_key] = last_checkout_tech(
+                        data,
+                        tool_id=str(h.get("tool_id") or ""),
+                        tool_no=str(h.get("tool_no") or ""),
+                    )
+                rows.append(
+                    {
+                        "When": _fmt_when(h.get("at", "")),
+                        "Action": h.get("action", ""),
+                        "Tool #": h.get("tool_no", ""),
+                        "Description": h.get("description", ""),
+                        "Tech": h.get("tech_name", ""),
+                        "Last out to": last_tech_cache[cache_key],
+                        "Qty": h.get("qty", ""),
+                        "Note": h.get("note", ""),
+                    }
+                )
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
