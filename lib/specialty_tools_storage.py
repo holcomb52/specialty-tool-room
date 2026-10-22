@@ -459,6 +459,25 @@ def _load_seed() -> Dict[str, Any]:
     return empty_inventory("empty")
 
 
+def _json_default(value: Any) -> str:
+    """Encode dates that a checkout form can place on a row.
+
+    ``json.dumps`` otherwise raises ``TypeError`` (``datetime.date`` is not JSON
+    serializable). That exception used to escape ``_save_local`` before the cloud
+    write, so the page died with a traceback and Supabase never saw the save.
+    """
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    raise TypeError(f"{type(value).__name__} is not JSON serializable")
+
+
+def _json_safe_store(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Deep-copy ``data`` into plain JSON values for the local file and jsonb."""
+    return json.loads(json.dumps(data, default=_json_default))
+
+
 def _save_local(data: Dict[str, Any]) -> None:
     try:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -587,6 +606,10 @@ def save_inventory(data: Dict[str, Any]) -> Tuple[bool, str]:
     expected_version = _store_version(data)
     normalized = _normalize(data)
     normalized["version"] = expected_version + 1
+    try:
+        normalized = _json_safe_store(normalized)
+    except (TypeError, ValueError) as exc:
+        return False, f"Could not save inventory ({exc})."
     _save_local(normalized)
     ok, err = _save_remote(normalized, expected_version=expected_version)
     if ok:

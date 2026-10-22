@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import json
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 
 from lib.specialty_tools_storage import (
     ACCOUNTABILITY_LOCATED,
     ACCOUNTABILITY_PART_ORDERED,
     ACCOUNTABILITY_SIGNED_OUT,
     ACCOUNTABILITY_UNACCOUNTED,
+    HISTORY_LIMIT,
     REMOTE_ERROR,
     REMOTE_OK,
     _load_seed,
@@ -773,3 +776,238 @@ def test_bootstrap_admin_skips_save_when_remote_errors(monkeypatch):
     )
     admin_users.ensure_bootstrap_admin("secret-password")
     assert saved["n"] == 0
+
+
+def _production_shaped_store() -> dict:
+    """Same shape that was on the live row: full history, one open checkout."""
+    assert HISTORY_LIMIT == 500
+    history = [
+        {
+            "id": f"hist-{index:04d}",
+            "action": "updated",
+            "tool_no": "OLD",
+            "at": "2026-01-01T00:00:00+00:00",
+        }
+        for index in range(HISTORY_LIMIT)
+    ]
+    return {
+        "version": 38,
+        "source": "Chrysler Tool Organization inventory",
+        "tools": [
+            {
+                "id": "tool-c4150a",
+                "tool_no": "C-4150A",
+                "description": "BALL JOINT",
+                "quantity": 1,
+                "status": "active",
+                "accountability": "located",
+                "location": "SHELF A",
+            },
+            {
+                "id": "tool-10198a",
+                "tool_no": "10198A",
+                "description": "VIBRATION DAMPENER HOLDER",
+                "quantity": 1,
+                "status": "active",
+                "accountability": "signed_out",
+                "location": "OUT",
+            },
+        ],
+        "active_checkouts": [
+            {
+                "id": "f3a3fa92-9ae2-4dc1-a8d3-defb9a01c384",
+                "tool_id": "tool-10198a",
+                "tool_no": "10198A",
+                "description": "VIBRATION DAMPENER HOLDER",
+                "tech_name": "Gregory Phillips",
+                "qty": 1,
+                "checked_out_at": "2026-10-06T15:00:00+00:00",
+                "ro_number": "583899",
+                "note": "",
+                "alert_dismissed_until": "2026-10-22",
+            }
+        ],
+        "history": history,
+    }
+
+
+def test_checkout_at_history_cap_saves_and_trims(tmp_path, monkeypatch):
+    live = tmp_path / "specialty_tools.json"
+    monkeypatch.setattr("lib.specialty_tools_storage.LIVE_PATH", live)
+
+    def fake_remote(data, *, expected_version=None):
+        assert expected_version == 38
+        assert data["version"] == 39
+        return True, ""
+
+    monkeypatch.setattr("lib.specialty_tools_storage._save_remote", fake_remote)
+    data = _production_shaped_store()
+    oldest_id = data["history"][-1]["id"]
+    ok, msg = checkout_tool(data, "tool-c4150a", "Dale Potts", ro_number="599001")
+    assert ok, msg
+    ok, err = save_inventory(data)
+    assert ok, err
+    assert data["version"] == 39
+
+    saved = json.loads(live.read_text())
+    assert saved["version"] == 39
+    assert [c["tech_name"] for c in saved["active_checkouts"]] == [
+        "Gregory Phillips",
+        "Dale Potts",
+    ]
+    assert saved["active_checkouts"][0]["alert_dismissed_until"] == "2026-10-22"
+    assert saved["active_checkouts"][1]["ro_number"] == "599001"
+    assert len(saved["history"]) == HISTORY_LIMIT
+    assert saved["history"][0]["action"] == "checkout"
+    assert saved["history"][0]["tech_name"] == "Dale Potts"
+    assert saved["history"][0]["tool_no"] == "C-4150A"
+    assert all(entry["id"] != oldest_id for entry in saved["history"])
+
+
+def test_save_inventory_serializes_dates_and_rejects_other_types(tmp_path, monkeypatch):
+    live = tmp_path / "specialty_tools.json"
+    monkeypatch.setattr("lib.specialty_tools_storage.LIVE_PATH", live)
+    captured = {}
+
+    def fake_remote(data, *, expected_version=None):
+        captured["data"] = data
+        captured["expected_version"] = expected_version
+        return True, ""
+
+    monkeypatch.setattr("lib.specialty_tools_storage._save_remote", fake_remote)
+    payload = {
+        "version": 5,
+        "source": "t",
+        "tools": [],
+        "active_checkouts": [
+            {
+                "id": "c1",
+                "checked_out_at": date(2026, 10, 22),
+                "alert_dismissed_until": datetime(
+                    2026, 10, 22, 17, 54, tzinfo=timezone.utc
+                ),
+            }
+        ],
+        "history": [],
+    }
+    ok, err = save_inventory(payload)
+    assert ok, err
+    assert payload["version"] == 6
+    checkout = captured["data"]["active_checkouts"][0]
+    assert checkout["checked_out_at"] == "2026-10-22"
+    assert checkout["alert_dismissed_until"].startswith("2026-10-22T17:54")
+    on_disk = json.loads(live.read_text())
+    assert on_disk["active_checkouts"][0]["checked_out_at"] == "2026-10-22"
+
+    local_calls = {"n": 0}
+    remote_calls = {"n": 0}
+    monkeypatch.setattr(
+        "lib.specialty_tools_storage._save_local",
+        lambda _data: local_calls.__setitem__("n", local_calls["n"] + 1),
+    )
+    monkeypatch.setattr(
+        "lib.specialty_tools_storage._save_remote",
+        lambda _data, expected_version=None: remote_calls.__setitem__(
+            "n", remote_calls["n"] + 1
+        )
+        or (True, ""),
+    )
+    bad = {
+        "version": 7,
+        "source": "t",
+        "tools": [],
+        "active_checkouts": [{"id": "c2", "tags": {"not", "json"}}],
+        "history": [],
+    }
+    ok, err = save_inventory(bad)
+    assert ok is False
+    assert "set is not JSON serializable" in err
+    assert bad["version"] == 7
+    assert local_calls["n"] == 0
+    assert remote_calls["n"] == 0
+    assert json.loads(live.read_text())["version"] == 6
+
+
+def _exception_text(at) -> str:
+    chunks = []
+    for exc in at.exception:
+        chunks.append(str(getattr(exc.proto, "message", "") or ""))
+        chunks.extend(list(exc.stack_trace or []))
+    return "\n".join(chunks)
+
+
+def _alert_text(at) -> str:
+    return "\n".join(err.value for err in at.error)
+
+
+def _open_checkout_app(monkeypatch, live: Path, store: dict):
+    from streamlit.testing.v1 import AppTest
+
+    live.write_text(json.dumps(store))
+    monkeypatch.setattr("lib.specialty_tools_storage.LIVE_PATH", live)
+    monkeypatch.setattr("lib.supabase_client.get_supabase", lambda: None)
+    app_path = Path(__file__).resolve().parent.parent / "app.py"
+    at = AppTest.from_file(str(app_path), default_timeout=90)
+    at.session_state["tool_room_authenticated"] = True
+    at.session_state["tool_room_role"] = "tech"
+    at.session_state["nav_page"] = "Check Out"
+    at.session_state["shop_tech_name"] = "Dale Potts"
+    at.run()
+    return at
+
+
+def test_checkout_page_saves_without_widget_error(tmp_path, monkeypatch):
+    live = tmp_path / "specialty_tools.json"
+    store = _production_shaped_store()
+    at = _open_checkout_app(monkeypatch, live, store)
+    assert len(at.exception) == 0, _exception_text(at)
+    at.text_input(key="co_ro").set_value("599001")
+    at.text_input(key="co_find").set_value("C-4150A")
+    at.run()
+    assert len(at.exception) == 0, _exception_text(at)
+    at.button(key="co_btn").click()
+    at.run()
+    # AppTest follows st.rerun(), so this tree is the run after the save:
+    # desk values applied, success flash shown, no widget exception.
+    assert "cannot be modified" not in _exception_text(at)
+    assert len(at.exception) == 0, _exception_text(at)
+    assert at.text_input(key="co_ro").value == "599001"
+    assert at.text_input(key="co_find").value == ""
+    assert any("Dale Potts" in item.value for item in at.success)
+    assert not any("Not saved" in item.value for item in at.error)
+
+    saved = json.loads(live.read_text())
+    assert [c["tech_name"] for c in saved["active_checkouts"]] == [
+        "Gregory Phillips",
+        "Dale Potts",
+    ]
+    assert saved["version"] == 39
+    assert len(saved["history"]) == HISTORY_LIMIT
+    assert saved["history"][0]["action"] == "checkout"
+    assert saved["history"][0]["ro_number"] == "599001"
+
+
+def test_failed_checkout_save_is_visible(tmp_path, monkeypatch):
+    live = tmp_path / "specialty_tools.json"
+    store = _production_shaped_store()
+
+    def fail_save(_data):
+        return False, "database unreachable"
+
+    monkeypatch.setattr("lib.specialty_tools_storage.save_inventory", fail_save)
+    at = _open_checkout_app(monkeypatch, live, store)
+    assert len(at.exception) == 0, _exception_text(at)
+    at.text_input(key="co_ro").set_value("599001")
+    at.text_input(key="co_find").set_value("C-4150A")
+    at.run()
+    at.button(key="co_btn").click()
+    at.run()
+    assert len(at.exception) == 0, _exception_text(at)
+    visible = _alert_text(at) + "\n" + "\n".join(item.value for item in at.success)
+    assert "Not saved to the shop database" in visible
+    assert "database unreachable" in visible
+    assert not any("Checked out" in item.value for item in at.success)
+    on_disk = json.loads(live.read_text())
+    assert [c["tech_name"] for c in on_disk["active_checkouts"]] == ["Gregory Phillips"]
+    assert on_disk["version"] == 38
+    assert len(at.session_state["specialty_tools_data"]["active_checkouts"]) == 2
