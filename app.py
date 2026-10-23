@@ -217,9 +217,27 @@ def _apply_pending_navigation() -> None:
 
 
 def _remember_checkout_desk(tech_name: str, ro_number: str) -> None:
-    """Keep the tech + RO filled in so the next tool on this job is one search away."""
-    tech = str(tech_name or "").strip()
-    ro = str(ro_number or "").strip()
+    """Keep the tech + RO filled in so the next tool on this job is one search away.
+
+    The RO box and the tool search already exist when Check out is clicked.
+    Writing ``co_ro`` or ``co_find`` here raises StreamlitAPIException
+    (``st.session_state.co_ro`` cannot be modified after the widget with key
+    ``co_ro`` is instantiated) and aborts the script after the save. Queue the
+    values and apply them on the next run, before those widgets are created.
+    """
+    st.session_state["_pending_desk"] = {
+        "tech": str(tech_name or "").strip(),
+        "ro": str(ro_number or "").strip(),
+    }
+
+
+def _apply_pending_desk() -> None:
+    """Apply a queued check-out desk reset before any widget with that key exists."""
+    pending = st.session_state.pop("_pending_desk", None)
+    if not isinstance(pending, dict):
+        return
+    tech = str(pending.get("tech") or "").strip()
+    ro = str(pending.get("ro") or "").strip()
     if tech:
         st.session_state.shop_tech_name = tech
         st.session_state.co_tech = tech
@@ -509,16 +527,35 @@ def _get_data():
     return data
 
 
-def _persist(data) -> None:
+def _persist(data) -> bool:
+    """Write inventory. False means the shop database did not accept it.
+
+    The in-memory copy stays in place either way so a failed cloud write can be
+    retried, but callers must not announce success unless this returns True.
+    """
     st.session_state.specialty_tools_data = data
-    _ok, err = save_inventory(data)
-    if err:
-        st.session_state["_sync_error"] = err
-    else:
-        st.session_state.pop("_sync_error", None)
+    try:
+        ok, err = save_inventory(data)
+    except Exception as exc:
+        ok, err = False, f"Could not save inventory ({exc})."
+    if not ok:
+        st.session_state["_sync_error"] = err or "Cloud save failed."
+        return False
+    st.session_state.pop("_sync_error", None)
+    return True
+
+
+def _unsaved_text() -> str:
+    err = str(st.session_state.get("_sync_error") or "Cloud save failed.")
+    return f"Not saved to the shop database. {err}"
 
 
 def _set_flash(message: str, kind: str = "success") -> None:
+    if kind == "success" and st.session_state.get("_sync_error"):
+        # Do not lead with the success sentence. The change is only in this
+        # session until the shop database accepts it.
+        message = _unsaved_text()
+        kind = "error"
     st.session_state["_flash"] = {"message": message, "kind": kind}
 
 
@@ -635,6 +672,7 @@ def _refresh_app_data() -> None:
 
 
 _apply_pending_navigation()
+_apply_pending_desk()
 
 with st.sidebar:
     st.markdown(
@@ -709,15 +747,13 @@ if data.get("_load_error"):
     )
 
 if st.session_state.get("_sync_error"):
-    st.markdown(
-        status_banner(
-            f"Saved locally, but cloud sync failed. Refresh after the database is reachable — "
-            f"this session's check-outs were kept so they are not overwritten. "
-            f"({st.session_state['_sync_error']})",
-            "warn",
-        ),
-        unsafe_allow_html=True,
+    _sync_msg = (
+        f"Not saved to the shop database ({st.session_state['_sync_error']}). "
+        "This screen still shows the change and will retry it. "
+        "Other computers will not see it until this message is gone."
     )
+    st.markdown(status_banner(_sync_msg, "error"), unsafe_allow_html=True)
+    st.error(_sync_msg)
 
 if is_tech() or page in ("Check Out", "Check In"):
     _render_desk_nav(page)
@@ -850,8 +886,10 @@ if page not in ("Check Out", "Check In"):
                     ):
                         ok, msg = dismiss_overdue_alert(data, cid, snooze_until)
                         if ok:
-                            _persist(data)
-                            st.success(msg)
+                            if _persist(data):
+                                st.success(msg)
+                            else:
+                                st.error(_unsaved_text())
                             st.rerun()
                         else:
                             st.error(msg)
@@ -866,8 +904,10 @@ if page not in ("Check Out", "Check In"):
                     ):
                         ok, msg = checkin_checkout(data, cid)
                         if ok:
-                            _persist(data)
-                            st.success(msg)
+                            if _persist(data):
+                                st.success(msg)
+                            else:
+                                st.error(_unsaved_text())
                             st.rerun()
                         else:
                             st.error(msg)
@@ -1184,10 +1224,12 @@ elif page == "Out Now":
                     note=new_note,
                 )
                 if ok:
-                    _persist(data)
-                    for key in (tech_key, ro_key, note_key):
-                        st.session_state.pop(key, None)
-                    st.success(msg)
+                    if _persist(data):
+                        for key in (tech_key, ro_key, note_key):
+                            st.session_state.pop(key, None)
+                        st.success(msg)
+                    else:
+                        st.error(_unsaved_text())
                     st.rerun()
                 else:
                     st.error(msg)
@@ -2477,7 +2519,7 @@ elif page == "Import":
                 data, tools, source=upload.name, keep_checkouts=True
             )
             stats = new_data.pop("_import_stats", {}) or {}
-            _persist(new_data)
+            saved = _persist(new_data)
             extras = []
             if int(stats.get("duplicates_removed") or 0):
                 extras.append(
@@ -2490,7 +2532,10 @@ elif page == "Import":
             msg = summary
             if extras:
                 msg = f"{summary} · " + "; ".join(extras)
-            st.success(msg)
+            if saved:
+                st.success(msg)
+            else:
+                st.error(_unsaved_text())
             st.rerun()
         elif summary:
             st.error(summary)
