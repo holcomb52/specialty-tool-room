@@ -66,15 +66,17 @@ Without Supabase, the app still works locally using `data/specialty_tools.json`.
 | Check Out | Search a tool and assign it to a tech |
 | Check In | Return a tool that was signed out |
 | Out Now | Who has what right now |
-| Catalog | Search inventory, edit location / qty |
+| Overdue | Tools out longer than the shop limit, and who has them |
+| Catalog | Search inventory, filter by status, location, and brand |
 | Reports | By tech / all out / returned — export PDF |
+| Usage | Admin: most-used, never/rarely, checkouts per tech |
 | Add Tool | Log new SST arrivals |
 | Technicians | Names for the check-out dropdown |
 | Admin users | Add/remove people with full admin access |
 | Import | Refresh from `.xls` / `.xlsx` inventory |
 | History | Audit trail |
 
-Tools out **5+ days** show a yellow alert at the top of every screen. You can pick a date to hide that alert until then, or check the tool in from the alert.
+Tools out longer than the shop limit (**5 days** unless a manager or admin changes it on **Overdue**) show a warning with the technician who has each one. **Usage** (Manager / Admin) summarizes checkouts over a date range. History keeps the newest **500** entries, and the usage page says so.
 
 ## Seed data
 
