@@ -356,7 +356,7 @@ def _start_checkout(
         ro_number=ro,
     )
     if ok:
-        _persist(data)
+        _persist(data, action="checkout")
         _remember_checkout_desk(tech, ro)
         _set_flash(msg)
         st.rerun()
@@ -407,7 +407,7 @@ def _complete_pending_checkout(data) -> None:
         ro_number=str(pending.get("ro") or ""),
     )
     if ok:
-        _persist(data)
+        _persist(data, action="checkout")
         _remember_checkout_desk(tech, str(pending.get("ro") or ""))
         _clear_checkout_pending()
         _set_flash(msg)
@@ -512,7 +512,8 @@ def _get_data():
     """
     pending = st.session_state.get("specialty_tools_data")
     if st.session_state.get("_sync_error") and isinstance(pending, dict):
-        _ok, err = save_inventory(pending)
+        # Already logged when the click failed. Don't add a row on every rerun.
+        _ok, err = save_inventory(pending, action="retry_unsaved", log_failure=False)
         if err:
             st.session_state["_sync_error"] = err
             ensure_checkout_ids(pending)
@@ -527,17 +528,48 @@ def _get_data():
     return data
 
 
-def _persist(data) -> bool:
+def _signed_in_user() -> str:
+    """Who to attach to a failed-save record. Falls back when a desk name isn't picked yet."""
+    role = str(st.session_state.get("tool_room_role") or "")
+    tech = str(st.session_state.get("shop_tech_name") or "").strip()
+    admin_name = str(st.session_state.get("tool_room_admin_name") or "").strip()
+    admin_user = str(st.session_state.get("tool_room_admin_username") or "").strip()
+    if role == "tech":
+        return tech or "Technician"
+    if role == "admin":
+        if admin_name and admin_user:
+            return f"{admin_name} ({admin_user})"
+        return admin_name or admin_user or "Admin"
+    if role == "manager":
+        return "Manager"
+    return tech or admin_name or "unknown"
+
+
+def _persist(data, *, action: str = "save") -> bool:
     """Write inventory. False means the shop database did not accept it.
 
     The in-memory copy stays in place either way so a failed cloud write can be
     retried, but callers must not announce success unless this returns True.
+    A failed save is also recorded (timestamp, action, error, user) for later;
+    the screen still says it was not saved.
     """
     st.session_state.specialty_tools_data = data
+    actor = _signed_in_user()
     try:
-        ok, err = save_inventory(data)
+        ok, err = save_inventory(data, action=action, user=actor)
     except Exception as exc:
         ok, err = False, f"Could not save inventory ({exc})."
+        try:
+            from lib.app_errors import record_save_failure
+
+            record_save_failure(
+                action=action,
+                error=err,
+                user=actor,
+                detail={"store_key": "specialty_tools"},
+            )
+        except Exception:
+            pass
     if not ok:
         st.session_state["_sync_error"] = err or "Cloud save failed."
         return False
@@ -886,7 +918,7 @@ if page not in ("Check Out", "Check In"):
                     ):
                         ok, msg = dismiss_overdue_alert(data, cid, snooze_until)
                         if ok:
-                            if _persist(data):
+                            if _persist(data, action="dismiss_overdue"):
                                 st.success(msg)
                             else:
                                 st.error(_unsaved_text())
@@ -904,7 +936,7 @@ if page not in ("Check Out", "Check In"):
                     ):
                         ok, msg = checkin_checkout(data, cid)
                         if ok:
-                            if _persist(data):
+                            if _persist(data, action="checkin"):
                                 st.success(msg)
                             else:
                                 st.error(_unsaved_text())
@@ -1106,7 +1138,7 @@ elif page == "Check In":
             ):
                 ok, msg = checkin_checkout(data, selected_ci["id"], note=note)
                 if ok:
-                    _persist(data)
+                    _persist(data, action="checkin")
                     st.session_state.pop("ci_picked_id", None)
                     _set_flash(msg)
                     st.rerun()
@@ -1224,7 +1256,7 @@ elif page == "Out Now":
                     note=new_note,
                 )
                 if ok:
-                    if _persist(data):
+                    if _persist(data, action="correct_checkout"):
                         for key in (tech_key, ro_key, note_key):
                             st.session_state.pop(key, None)
                         st.success(msg)
@@ -1373,7 +1405,7 @@ elif page == "Catalog":
         ):
             ok, msg = receive_ordered_part(data, recv_id, recv_loc)
             if ok:
-                _persist(data)
+                _persist(data, action="receive_part")
                 st.session_state.pop(recv_loc_key, None)
                 _set_flash(f"{msg} — removed from Part Ordered.")
                 st.rerun()
@@ -1520,7 +1552,7 @@ elif page == "Catalog":
                     set_replacement_cost=True,
                 )
                 if ok:
-                    _persist(data)
+                    _persist(data, action="update_tool")
                     st.session_state.pop(loc_key, None)
                     st.session_state.pop(acct_key, None)
                     st.session_state.pop(ordered_key, None)
@@ -1640,7 +1672,7 @@ elif page == "Catalog":
                     kwargs["set_replacement_cost"] = True
                 ok, msg = update_tool(data, assign_id, **kwargs)
                 if ok:
-                    _persist(data)
+                    _persist(data, action="update_tool")
                     st.session_state.pop(loc_key, None)
                     st.session_state.pop(acct_key, None)
                     st.session_state.pop(f"assign_repl_cost_{assign_id}", None)
@@ -1834,7 +1866,7 @@ elif page == "Catalog":
                         accountability=new_acct or None,
                     )
                     if ok:
-                        _persist(data)
+                        _persist(data, action="update_tool")
                         for key in (
                             loc_key,
                             qty_key,
@@ -1902,7 +1934,7 @@ elif page == "Catalog":
                             st.session_state.pop(confirm_key, None)
                             st.session_state.pop(force_key, None)
                             if ok:
-                                _persist(data)
+                                _persist(data, action="delete_tool")
                                 st.session_state.pop("edit_tool_id", None)
                                 _set_flash(msg)
                                 st.rerun()
@@ -2169,7 +2201,7 @@ elif page == "Replacement Costs":
                                 data, selected_ids, clean_loc
                             )
                             if ok:
-                                _persist(data)
+                                _persist(data, action="locate_tools")
                                 _bump_need_order_editor()
                                 _set_flash(f"{msg} — removed from Need to order.")
                                 st.rerun()
@@ -2195,7 +2227,7 @@ elif page == "Replacement Costs":
                                 elif not failed:
                                     failed = msg
                             if saved:
-                                _persist(data)
+                                _persist(data, action="replacement_cost")
                                 if saved == 1:
                                     _set_flash("Saved replacement cost.")
                                 else:
@@ -2209,7 +2241,7 @@ elif page == "Replacement Costs":
                         else:
                             ok, msg = mark_tools_part_ordered(data, selected_ids)
                             if ok:
-                                _persist(data)
+                                _persist(data, action="mark_part_ordered")
                                 _bump_need_order_editor()
                                 _set_flash(f"{msg}")
                                 st.rerun()
@@ -2315,7 +2347,7 @@ elif page == "Add Tool":
             status=status,
         )
         if ok:
-            _persist(data)
+            _persist(data, action="add_tool")
             saved_no = (tool or {}).get("tool_no") or str(tool_no).strip()
             _set_flash(f"Saved — {saved_no} was added to inventory.")
             st.session_state["_clear_add_form"] = True
@@ -2519,7 +2551,7 @@ elif page == "Import":
                 data, tools, source=upload.name, keep_checkouts=True
             )
             stats = new_data.pop("_import_stats", {}) or {}
-            saved = _persist(new_data)
+            saved = _persist(new_data, action="import")
             extras = []
             if int(stats.get("duplicates_removed") or 0):
                 extras.append(
@@ -2869,7 +2901,7 @@ elif page == "Reports":
             if desired == "clear" and result:
                 ok, msg = clear_inventory_mark(data, tid)
                 if ok:
-                    _persist(data)
+                    _persist(data, action="inventory")
                     for k in (
                         f"inv_located_{tid}",
                         f"inv_missing_{tid}",
@@ -2890,7 +2922,7 @@ elif page == "Reports":
                     data, tid, desired, counted_by=counted_by
                 )
                 if ok:
-                    _persist(data)
+                    _persist(data, action="inventory")
                     for k in (
                         f"inv_located_{tid}",
                         f"inv_missing_{tid}",

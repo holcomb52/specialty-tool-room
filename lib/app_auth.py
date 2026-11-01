@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import List
 
 import streamlit as st
@@ -51,6 +52,16 @@ TECH_PAGES = [
 
 
 def _secret(name: str) -> str:
+    """Streamlit secrets, unless the same name is set in the environment.
+
+    The environment wins so a signed-in smoke test can pass a password
+    without writing ``.streamlit/secrets.toml``. An empty variable does not
+    override a secret. Streamlit Cloud does not set these, so the shop app
+    keeps using its secrets.
+    """
+    env_val = str(os.environ.get(name) or "").strip()
+    if env_val:
+        return env_val
     try:
         return str(st.secrets.get(name, "") or "").strip()
     except Exception:

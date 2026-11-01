@@ -1,5 +1,6 @@
 __pycache__/
 *.py[cod]
+.pytest_cache/
 .venv/
 venv/
 .env
@@ -7,4 +8,6 @@ venv/
 .DS_Store
 data/specialty_tools.json
 data/admin_users.json
+data/app_errors.jsonl
+backups/
 *.pem

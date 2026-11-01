@@ -26,6 +26,7 @@ Create a **new** Supabase project just for Specialty Tool Room. Do **not** reuse
 2. Name it something like `specialty-tool-room`.
 3. Open **SQL Editor → New query**.
 4. Paste everything from `supabase/schema.sql` and click **Run**.
+   On a project that already has `specialty_tools_store`, run `supabase/migrations/20261101223000_app_errors_and_backups.sql` instead of pasting the whole schema again. That file adds the save-failure log and the backup table. It does not rewrite the inventory.
 5. Go to **Project Settings → API** and copy:
    - **Project URL**
    - **service_role** key (keep this secret)
@@ -70,6 +71,20 @@ Use the **service_role** key from Supabase (not the anon key).
 Wait 2–5 minutes. Streamlit gives you a public URL.
 
 ---
+
+## GitHub Actions secrets (backup and smoke test)
+
+Repository → **Settings → Secrets and variables → Actions → New repository secret**.
+
+| Secret | Value |
+|--------|--------|
+| `SUPABASE_URL` | Same Project URL as Streamlit |
+| `SUPABASE_SERVICE_ROLE_KEY` | service_role key (same value as Streamlit `SUPABASE_KEY`) |
+| `TOOL_ROOM_SMOKE_ROLE` | `technician`, `admin`, or `manager` (only for the manual smoke test) |
+| `TOOL_ROOM_SMOKE_PASSWORD` | Password for that role |
+| `TOOL_ROOM_SMOKE_USERNAME` | Admin username, only when the role is `admin` |
+
+The test workflow does not use these. The daily backup uses the first two. **Signed-in smoke test** is manual and read-only. Details are in the README.
 
 ## Step 4 — Bookmark it
 

@@ -59,6 +59,40 @@ TECH_PASSWORD = "choose-a-shared-tech-password"
 
 Without Supabase, the app still works locally using `data/specialty_tools.json`.
 
+## Tests, failed saves, and backups
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest
+```
+
+GitHub Actions runs that on every push and pull request. The test job has no Supabase secrets. Tests mock the database and do not read or write the shop project.
+
+When a save to Supabase fails, the screen still says **Not saved to the shop database**. The same failure is stored with a timestamp, the action (`checkout`, `checkin`, and so on), the error text, and the signed-in user (`user_name`). Until the migration below has been run, that record is a row in `specialty_tools_store` with `store_key = app_errors` (not the inventory). After the migration, new failures go to `public.app_errors`.
+
+### What to set up once
+
+1. **SQL (existing project).** In the Supabase SQL Editor, run `supabase/migrations/20261101223000_app_errors_and_backups.sql`. This adds `app_errors` and `specialty_tools_backups` and turns on row level security. It does not change the inventory row. A brand-new project can keep using `supabase/schema.sql`, which now includes the same tables.
+2. **GitHub Actions secrets** (Settings → Secrets and variables → Actions). Do not commit these.
+   - `SUPABASE_URL` — same Project URL as Streamlit
+   - `SUPABASE_SERVICE_ROLE_KEY` — the service_role key (the same value as Streamlit's `SUPABASE_KEY`, not the anon key)
+3. **Daily backup.** `.github/workflows/backup-specialty-tools.yml` runs at 11:15 UTC (6:15am EST / 7:15am EDT). It reads `specialty_tools`, uploads `backups/specialty_tools.json` as an artifact kept 90 days, and inserts a copy into `specialty_tools_backups` (45 days kept in the table). You can also run it from the Actions tab. If the migration has not been applied, the artifact is still uploaded and the job fails on the table insert.
+4. **Signed-in smoke test (optional, read-only).** It logs in and opens every tab for that role. It does not click Check out or Check in, and it blocks Supabase writes.
+
+   ```bash
+   export TOOL_ROOM_SMOKE=1
+   export TOOL_ROOM_SMOKE_ROLE=technician   # or admin, or manager
+   export TOOL_ROOM_SMOKE_PASSWORD='the password for that role'
+   # admin only:
+   # export TOOL_ROOM_SMOKE_USERNAME=some-admin
+   # optional, to read the live catalog while staying read-only:
+   # export SUPABASE_URL=...
+   # export SUPABASE_KEY=...   # service_role
+   python scripts/smoke_signed_in.py
+   ```
+
+   The same script is on the Actions tab as **Signed-in smoke test**, manual only. That workflow also needs secrets `TOOL_ROOM_SMOKE_ROLE`, `TOOL_ROOM_SMOKE_PASSWORD`, and `TOOL_ROOM_SMOKE_USERNAME` (admin only). It reuses `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`.
+
 ## What it does
 
 | Screen | Purpose |

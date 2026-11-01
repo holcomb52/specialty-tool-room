@@ -593,29 +593,80 @@ def load_inventory() -> Dict[str, Any]:
             from lib.supabase_client import get_supabase
 
             if get_supabase():
-                save_inventory(local)
+                save_inventory(local, action="upload_local_cache")
         return local
 
     seed = _load_seed()
     if seed.get("tools"):
-        save_inventory(seed)
+        save_inventory(seed, action="seed_inventory")
     return seed
 
 
-def save_inventory(data: Dict[str, Any]) -> Tuple[bool, str]:
+def _record_failed_save(
+    *,
+    action: str,
+    error: str,
+    user: str,
+    log_failure: bool,
+    version: int,
+) -> None:
+    if not log_failure:
+        return
+    try:
+        from lib.app_errors import record_save_failure
+
+        record_save_failure(
+            action=action,
+            error=error,
+            user=user,
+            detail={"store_key": STORE_KEY, "version": version},
+        )
+    except Exception:
+        return
+
+
+def save_inventory(
+    data: Dict[str, Any],
+    *,
+    action: str = "save_inventory",
+    user: str = "",
+    log_failure: bool = True,
+) -> Tuple[bool, str]:
+    """Save the inventory. On failure, record action / error / user and return the error.
+
+    ``log_failure=False`` is for the automatic retry on the next page load.
+    The click that failed already wrote a row; logging every rerun would fill
+    the error log while the database is down.
+    """
     expected_version = _store_version(data)
     normalized = _normalize(data)
     normalized["version"] = expected_version + 1
     try:
         normalized = _json_safe_store(normalized)
     except (TypeError, ValueError) as exc:
-        return False, f"Could not save inventory ({exc})."
+        err = f"Could not save inventory ({exc})."
+        _record_failed_save(
+            action=action,
+            error=err,
+            user=user,
+            log_failure=log_failure,
+            version=expected_version,
+        )
+        return False, err
     _save_local(normalized)
     ok, err = _save_remote(normalized, expected_version=expected_version)
     if ok:
         data["version"] = normalized["version"]
         return True, ""
-    return False, err or "Cloud save failed."
+    err = err or "Cloud save failed."
+    _record_failed_save(
+        action=action,
+        error=err,
+        user=user,
+        log_failure=log_failure,
+        version=expected_version,
+    )
+    return False, err
 
 
 def _append_history(data: Dict[str, Any], entry: Dict[str, Any]) -> None:
