@@ -1,0 +1,36 @@
+name: Signed-in smoke test
+
+# Opt-in only. Run this by hand from the Actions tab after the secrets below
+# exist. It is not on push or pull_request. The script reads the live catalog
+# when the Supabase secrets are set and refuses every write.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Open each tab while signed in
+        env:
+          TOOL_ROOM_SMOKE: "1"
+          TOOL_ROOM_SMOKE_ROLE: ${{ secrets.TOOL_ROOM_SMOKE_ROLE }}
+          TOOL_ROOM_SMOKE_PASSWORD: ${{ secrets.TOOL_ROOM_SMOKE_PASSWORD }}
+          TOOL_ROOM_SMOKE_USERNAME: ${{ secrets.TOOL_ROOM_SMOKE_USERNAME }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: python scripts/smoke_signed_in.py

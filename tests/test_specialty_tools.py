@@ -180,7 +180,9 @@ def test_report_rows_and_pdf():
 
 
 def test_check_in_my_tools_keeps_checkout_id():
-    """Check In crashed with KeyError when My tools was selected.
+    """Regression for the Check In KeyError (PR #2).
+
+    Check In crashed with KeyError when My tools was selected.
 
     The live screen (Charles Hinxman, My tools (1), Everyone (3)) built
     ``ids = {c["id"] for c in checkouts_sorted}`` from
@@ -635,7 +637,7 @@ def test_load_inventory_does_not_reseed_when_remote_errors(monkeypatch):
     )
     monkeypatch.setattr("lib.specialty_tools_storage._load_local", lambda: None)
 
-    def _fail_if_saved(_data):
+    def _fail_if_saved(_data, **_kwargs):
         saved["n"] += 1
         return True, ""
 
@@ -662,7 +664,7 @@ def test_load_inventory_keeps_empty_remote_catalog(monkeypatch):
     )
     monkeypatch.setattr(
         "lib.specialty_tools_storage.save_inventory",
-        lambda _data: saved.__setitem__("n", saved["n"] + 1) or (True, ""),
+        lambda _data, **_kwargs: saved.__setitem__("n", saved["n"] + 1) or (True, ""),
     )
     data = load_inventory()
     assert data["tools"] == []
@@ -957,6 +959,7 @@ def _open_checkout_app(monkeypatch, live: Path, store: dict):
 
 
 def test_checkout_page_saves_without_widget_error(tmp_path, monkeypatch):
+    """Regression for StreamlitAPIException on co_ro after check-out (PR #3)."""
     live = tmp_path / "specialty_tools.json"
     store = _production_shaped_store()
     at = _open_checkout_app(monkeypatch, live, store)
@@ -991,7 +994,7 @@ def test_failed_checkout_save_is_visible(tmp_path, monkeypatch):
     live = tmp_path / "specialty_tools.json"
     store = _production_shaped_store()
 
-    def fail_save(_data):
+    def fail_save(_data, **_kwargs):
         return False, "database unreachable"
 
     monkeypatch.setattr("lib.specialty_tools_storage.save_inventory", fail_save)

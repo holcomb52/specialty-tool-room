@@ -1,0 +1,37 @@
+name: Daily specialty tools backup
+
+# 11:15 UTC is 6:15am Eastern Standard Time and 7:15am Eastern Daylight Time
+# (New Smyrna Beach). GitHub may start a scheduled run later than the cron.
+on:
+  schedule:
+    - cron: "15 11 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Snapshot specialty_tools
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: python scripts/backup_specialty_tools.py
+
+      - name: Upload snapshot artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: specialty-tools-backup-${{ github.run_id }}
+          path: backups/specialty_tools.json
+          retention-days: 90
+          if-no-files-found: warn
