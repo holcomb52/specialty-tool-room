@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import os
 from typing import List
 
 import streamlit as st
+from dotenv import load_dotenv
 
 from lib.admin_users import authenticate_admin, ensure_bootstrap_admin, load_admin_users
 
@@ -51,6 +53,20 @@ TECH_PAGES = [
 
 
 def _secret(name: str) -> str:
+    """Shop password from the environment, then Streamlit secrets.
+
+    Supabase credentials are already read from the environment first. The
+    technician and manager passwords were not, so a cold start where
+    ``st.secrets`` is missing or raises left both passwords blank. The shared
+    shop login then stopped on the sign-in screen (or said it was not set
+    up). Check-out and check-in never ran, and the database saw loads but no
+    save. Streamlit still injects the same secrets as environment variables,
+    which is what the database client uses.
+    """
+    load_dotenv()
+    env_val = str(os.environ.get(name, "") or "").strip()
+    if env_val:
+        return env_val
     try:
         return str(st.secrets.get(name, "") or "").strip()
     except Exception:
