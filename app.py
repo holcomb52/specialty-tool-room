@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import tempfile
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -40,7 +41,6 @@ from lib.specialty_tools_storage import (
     INVENTORY_RESULT_LOCATED,
     INVENTORY_RESULT_MISSING,
     INVENTORY_RESULT_RETURNED,
-    OVERDUE_AFTER_DAYS,
     add_tool,
     all_open_checkout_report_rows,
     apply_inventory_mark,
@@ -62,6 +62,7 @@ from lib.specialty_tools_storage import (
     load_inventory,
     locate_unaccounted_tool,
     normalize_accountability,
+    overdue_after_days,
     qty_out,
     receive_ordered_part,
     repair_checkout_ids,
@@ -69,6 +70,7 @@ from lib.specialty_tools_storage import (
     returned_tool_report_rows,
     save_inventory,
     search_tools,
+    set_overdue_after_days,
     technicians_with_open_checkouts,
     tool_replacement_cost,
     unaccounted_replacement_totals,
@@ -130,6 +132,8 @@ from lib.reports_pdf import (
 )
 from lib.supabase_client import is_configured
 from lib.tech_list import _normalize, add_technician, load_technicians, remove_technician
+from lib.tool_search import BRAND_LABELS, BRAND_LEVEL_LABELS, BRAND_LEVELS, BRANDS
+from lib.usage_report import build_usage_report, usage_history_note
 from styles import CUSTOM_CSS
 
 st.set_page_config(
@@ -200,6 +204,8 @@ def _catalog_card_prefs(**overrides) -> dict:
         "cat_without_loc": False,
         "cat_unaccounted": False,
         "cat_part_ordered": False,
+        "cat_brand": "",
+        "cat_brand_level": "",
     }
     prefs.update(overrides)
     return prefs
@@ -550,6 +556,119 @@ def _unsaved_text() -> str:
     return f"Not saved to the shop database. {err}"
 
 
+def _html(value: object) -> str:
+    return html.escape(str(value or ""), quote=True)
+
+
+def _brand_filter_widgets(key_prefix: str) -> tuple[str, str]:
+    """Brand filters from the inventory spreadsheet (E / R flags)."""
+    left, right = st.columns(2)
+    with left:
+        brand = st.selectbox(
+            "Brand",
+            options=[""] + list(BRANDS),
+            format_func=lambda value: "Any brand" if not value else BRAND_LABELS.get(value, value),
+            key=f"{key_prefix}_brand",
+        )
+    with right:
+        level = st.selectbox(
+            "Brand flag",
+            options=[""] + list(BRAND_LEVELS),
+            format_func=lambda value: (
+                "Essential or recommended"
+                if not value
+                else BRAND_LEVEL_LABELS.get(value, value)
+            ),
+            key=f"{key_prefix}_brand_level",
+            help="Spreadsheet flags: Essential (E) or Recommended (R).",
+        )
+    return str(brand or ""), str(level or "")
+
+
+def _render_overdue_desk_banner(data: dict) -> None:
+    """One line on the check-out desk naming who still has an overdue tool."""
+    overdue = list_overdue_checkouts(data)
+    if not overdue:
+        return
+    days = overdue_after_days(data)
+    bits = []
+    for item in overdue[:4]:
+        bits.append(
+            f"{item.get('tool_no') or 'tool'} "
+            f"({item.get('tech_name') or 'unknown'}, {int(item.get('days_out') or 0)}d)"
+        )
+    extra = f" +{len(overdue) - 4} more" if len(overdue) > 4 else ""
+    message = (
+        f"{len(overdue)} overdue ({days}+ days): "
+        + ", ".join(bits)
+        + extra
+        + ". Open Overdue for the full list."
+    )
+    st.markdown(status_banner(_html(message), "warn"), unsafe_allow_html=True)
+
+
+def _render_overdue_alert_cards(data: dict, overdue: list) -> None:
+    """Prominent cards: tool, who has it, and dismiss / check-in."""
+    for item in overdue:
+        cid = str(item.get("id") or "")
+        days_out = int(item.get("days_out") or days_checked_out(item))
+        with st.container():
+            st.markdown(
+                f"""
+                <div class="overdue-alert">
+                    <div class="overdue-title">{_html(item.get('tool_no', ''))} — {_html(item.get('description', ''))}</div>
+                    <div class="overdue-meta">With <strong>{_html(item.get('tech_name', ''))}</strong>
+                    · out {days_out} day(s)
+                    · since {_html(_fmt_when(item.get('checked_out_at', '')))}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            d1, d2, d3 = st.columns([1.4, 1.2, 1])
+            with d1:
+                snooze_until = st.date_input(
+                    "Dismiss alert until",
+                    value=date.today() + timedelta(days=7),
+                    min_value=date.today() + timedelta(days=1),
+                    key=f"overdue_until_{cid}",
+                )
+            with d2:
+                st.write("")
+                st.write("")
+                if st.button(
+                    "Dismiss until date",
+                    key=f"overdue_dismiss_{cid}",
+                    use_container_width=True,
+                ):
+                    ok, msg = dismiss_overdue_alert(data, cid, snooze_until)
+                    if ok:
+                        if _persist(data):
+                            st.success(msg)
+                        else:
+                            st.error(_unsaved_text())
+                        st.rerun()
+                    else:
+                        st.error(msg)
+            with d3:
+                st.write("")
+                st.write("")
+                if st.button(
+                    "Check in now",
+                    key=f"overdue_checkin_{cid}",
+                    use_container_width=True,
+                    type="primary",
+                ):
+                    ok, msg = checkin_checkout(data, cid)
+                    if ok:
+                        if _persist(data):
+                            st.success(msg)
+                        else:
+                            st.error(_unsaved_text())
+                        st.rerun()
+                    else:
+                        st.error(msg)
+
+
 def _set_flash(message: str, kind: str = "success") -> None:
     if kind == "success" and st.session_state.get("_sync_error"):
         # Do not lead with the success sentence. The change is only in this
@@ -758,8 +877,12 @@ if st.session_state.get("_sync_error"):
 if is_tech() or page in ("Check Out", "Check In"):
     _render_desk_nav(page)
 
+if page in ("Check Out", "Check In"):
+    _render_overdue_desk_banner(data)
+
 if page not in ("Check Out", "Check In"):
     stats = inventory_stats(data)
+    overdue_days = overdue_after_days(data)
     row1 = st.columns(3)
     row2 = st.columns(3)
     with row1[0]:
@@ -783,12 +906,12 @@ if page not in ("Check Out", "Check In"):
             _goto_page("Out Now", out_now_overdue_only=False)
     with row1[2]:
         if st.button(
-            f"⚠  Out over 5 days\n{stats['overdue']}",
+            f"⚠  Out over {overdue_days} days\n{stats['overdue']}",
             key="stat_overdue",
             use_container_width=True,
-            help="Open Out Now — tools out 5+ days",
+            help=f"Open Overdue — tools out {overdue_days}+ days and who has them",
         ):
-            _goto_page("Out Now", out_now_overdue_only=True)
+            _goto_page("Overdue")
     with row2[0]:
         if st.button(
             f"📍  With location\n{stats['with_location']}",
@@ -844,73 +967,19 @@ if page not in ("Check Out", "Check In"):
         ):
             _goto_page("Replacement Costs", need_order_filter="all")
 
-    overdue = list_overdue_checkouts(data)
-    if overdue:
-        st.markdown(
-            status_banner(
-                f"{len(overdue)} tool(s) have been out {OVERDUE_AFTER_DAYS}+ days — dismiss until a date if still needed.",
-                "warn",
-            ),
-            unsafe_allow_html=True,
-        )
-        for item in overdue:
-            cid = str(item.get("id") or "")
-            days_out = int(item.get("days_out") or days_checked_out(item))
-            with st.container():
-                st.markdown(
-                    f"""
-                    <div class="overdue-alert">
-                        <div class="overdue-title">{item.get('tool_no', '')} — {item.get('description', '')}</div>
-                        <div class="overdue-meta">With <strong>{item.get('tech_name', '')}</strong>
-                        · out {days_out} day(s)
-                        · since {_fmt_when(item.get('checked_out_at', ''))}</div>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
-                d1, d2, d3 = st.columns([1.4, 1.2, 1])
-                with d1:
-                    snooze_until = st.date_input(
-                        "Dismiss alert until",
-                        value=date.today() + timedelta(days=7),
-                        min_value=date.today() + timedelta(days=1),
-                        key=f"overdue_until_{cid}",
-                    )
-                with d2:
-                    st.write("")
-                    st.write("")
-                    if st.button(
-                        "Dismiss until date",
-                        key=f"overdue_dismiss_{cid}",
-                        use_container_width=True,
-                    ):
-                        ok, msg = dismiss_overdue_alert(data, cid, snooze_until)
-                        if ok:
-                            if _persist(data):
-                                st.success(msg)
-                            else:
-                                st.error(_unsaved_text())
-                            st.rerun()
-                        else:
-                            st.error(msg)
-                with d3:
-                    st.write("")
-                    st.write("")
-                    if st.button(
-                        "Check in now",
-                        key=f"overdue_checkin_{cid}",
-                        use_container_width=True,
-                        type="primary",
-                    ):
-                        ok, msg = checkin_checkout(data, cid)
-                        if ok:
-                            if _persist(data):
-                                st.success(msg)
-                            else:
-                                st.error(_unsaved_text())
-                            st.rerun()
-                        else:
-                            st.error(msg)
+    if page != "Overdue":
+        overdue = list_overdue_checkouts(data)
+        if overdue:
+            st.markdown(
+                status_banner(
+                    f"{len(overdue)} tool(s) have been out {overdue_days}+ days — who has them is listed below. Dismiss until a date if still needed.",
+                    "warn",
+                ),
+                unsafe_allow_html=True,
+            )
+            if st.button("Open overdue list", key="overdue_open_list"):
+                _goto_page("Overdue")
+            _render_overdue_alert_cards(data, overdue)
 
     st.markdown("<hr>", unsafe_allow_html=True)
 
@@ -939,7 +1008,21 @@ if page == "Check Out":
             on_change=_force_upper,
             args=("co_find",),
         )
-        tools = search_tools(data, find, status="active")
+        with st.expander("Location and brand filters"):
+            co_locs = ["(any location)"] + unique_locations(data)
+            if st.session_state.get("co_loc") not in co_locs:
+                st.session_state.co_loc = "(any location)"
+            co_loc_pick = st.selectbox("Location", options=co_locs, key="co_loc")
+            co_brand, co_brand_level = _brand_filter_widgets("co")
+        co_location = "" if co_loc_pick == "(any location)" else co_loc_pick
+        tools = search_tools(
+            data,
+            find,
+            status="active",
+            location=co_location,
+            brand=co_brand,
+            brand_level=co_brand_level,
+        )
         available = [
             t
             for t in tools
@@ -1116,9 +1199,10 @@ elif page == "Check In":
 elif page == "Out Now":
     checkouts = repair_checkout_ids(list(data.get("active_checkouts") or []))
     overdue_only = bool(st.session_state.get("out_now_overdue_only"))
+    out_now_limit = overdue_after_days(data)
     if overdue_only:
-        checkouts = [c for c in checkouts if days_checked_out(c) >= OVERDUE_AFTER_DAYS]
-        st.caption(f"Showing tools out {OVERDUE_AFTER_DAYS}+ days only.")
+        checkouts = [c for c in checkouts if days_checked_out(c) >= out_now_limit]
+        st.caption(f"Showing tools out {out_now_limit}+ days only.")
         if st.button("Show all checked out", key="out_now_clear_overdue"):
             st.session_state.out_now_overdue_only = False
             st.rerun()
@@ -1127,7 +1211,7 @@ elif page == "Out Now":
         if overdue_only:
             st.markdown(
                 status_banner(
-                    f"No tools have been out {OVERDUE_AFTER_DAYS}+ days right now.",
+                    f"No tools have been out {out_now_limit}+ days right now.",
                     "success",
                 ),
                 unsafe_allow_html=True,
@@ -1234,6 +1318,95 @@ elif page == "Out Now":
                 else:
                     st.error(msg)
 
+elif page == "Overdue":
+    threshold = overdue_after_days(data)
+    st.markdown("##### Overdue tools")
+    st.caption(
+        f"A tool is overdue when it has been signed out for {threshold} days or more. "
+        "The list shows who has it. Snoozed alerts stay on this list until the tool is checked in."
+    )
+    if is_admin():
+        st.markdown("##### Shop threshold")
+        if "overdue_days_setting" not in st.session_state:
+            st.session_state.overdue_days_setting = int(threshold)
+        chosen_days = st.number_input(
+            "Flag a checkout after this many days",
+            min_value=1,
+            max_value=90,
+            step=1,
+            key="overdue_days_setting",
+            help="Default is 5 days. Applies to the warning banner, this list, and reports.",
+        )
+        if st.button("Save threshold", key="overdue_days_save", type="primary"):
+            ok, msg = set_overdue_after_days(data, int(chosen_days))
+            if not ok:
+                st.error(msg)
+            elif _persist(data):
+                st.session_state.pop("overdue_days_setting", None)
+                _set_flash(msg)
+                st.rerun()
+            else:
+                st.error(_unsaved_text())
+    else:
+        st.caption("A manager or admin can change how many days count as overdue.")
+
+    _show_flash()
+    actionable = list_overdue_checkouts(data)
+    everyone = list_overdue_checkouts(data, include_dismissed=True)
+    snoozed = [item for item in everyone if item.get("alert_snoozed")]
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.markdown(
+            stat_card("Overdue", str(len(everyone)), "orange" if everyone else "green", "⚠"),
+            unsafe_allow_html=True,
+        )
+    with c2:
+        st.markdown(
+            stat_card("Needs attention", str(len(actionable)), "orange" if actionable else "green", "●"),
+            unsafe_allow_html=True,
+        )
+    with c3:
+        st.markdown(
+            stat_card("Alert snoozed", str(len(snoozed)), "stone", "—"),
+            unsafe_allow_html=True,
+        )
+
+    if not everyone:
+        st.markdown(
+            status_banner(
+                f"No tools have been out {threshold}+ days.",
+                "success",
+            ),
+            unsafe_allow_html=True,
+        )
+    else:
+        rows = []
+        for item in everyone:
+            until = str(item.get("alert_dismissed_until") or "")
+            rows.append(
+                {
+                    "Tool #": item.get("tool_no", ""),
+                    "Description": item.get("description", ""),
+                    "Who has it": item.get("tech_name", ""),
+                    "Days out": int(item.get("days_out") or 0),
+                    "Qty": item.get("qty", 1),
+                    "RO #": item.get("ro_number", ""),
+                    "Out since": _fmt_when(item.get("checked_out_at", "")),
+                    "Alert": (
+                        f"Hidden until {until[:10]}"
+                        if item.get("alert_snoozed") and until
+                        else "Showing"
+                    ),
+                    "Note": item.get("note", ""),
+                }
+            )
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        if actionable:
+            st.markdown("##### Still needs attention")
+            _render_overdue_alert_cards(data, actionable)
+        elif snoozed:
+            st.caption("Every overdue alert is snoozed. The tools are still signed out.")
+
 elif page == "Catalog":
     locs = ["(any location)"] + unique_locations(data)
     # Defaults from clickable dashboard stats (session prefs)
@@ -1251,6 +1424,10 @@ elif page == "Catalog":
         st.session_state.cat_unaccounted = False
     if "cat_part_ordered" not in st.session_state:
         st.session_state.cat_part_ordered = False
+    if "cat_brand" not in st.session_state:
+        st.session_state.cat_brand = ""
+    if "cat_brand_level" not in st.session_state:
+        st.session_state.cat_brand_level = ""
 
     f1, f2, f3, f4 = st.columns([2.2, 1.2, 1.2, 1.4])
     with f1:
@@ -1279,6 +1456,8 @@ elif page == "Catalog":
         only_unaccounted = st.checkbox("Unaccounted", key="cat_unaccounted")
         only_part_ordered = st.checkbox("Part Ordered", key="cat_part_ordered")
 
+    brand, brand_level = _brand_filter_widgets("cat")
+
     # Keep location / box filters exclusive with each other
     if only_part_ordered:
         only_unaccounted = False
@@ -1301,6 +1480,8 @@ elif page == "Catalog":
         only_without_location=only_without_loc,
         only_unaccounted=only_unaccounted,
         only_part_ordered=only_part_ordered,
+        brand=brand,
+        brand_level=brand_level,
     )
     st.caption(f"{len(matches)} tool(s)")
     _show_flash()
@@ -2541,6 +2722,8 @@ elif page == "Import":
             st.error(summary)
 
 elif page == "Reports":
+    report_overdue_days = overdue_after_days(data)
+    overdue_label = f"Over {report_overdue_days} days"
     st.markdown("##### Reports")
     st.caption(
         "Checkout reports for the shop — plus a physical inventory count for Admin / Manager."
@@ -2583,16 +2766,16 @@ elif page == "Reports":
             return [
                 (count_label, "0"),
                 ("Longest out", "—"),
-                ("Over 5 days", "0"),
+                (overdue_label, "0"),
             ]
         longest = max(int(r.get("days_out") or 0) for r in rows_raw)
         overdue_n = sum(
-            1 for r in rows_raw if int(r.get("days_out") or 0) >= OVERDUE_AFTER_DAYS
+            1 for r in rows_raw if int(r.get("days_out") or 0) >= report_overdue_days
         )
         return [
             (count_label, str(len(rows_raw))),
             ("Longest out", f"{longest} day{'s' if longest != 1 else ''}"),
-            ("Over 5 days", str(overdue_n)),
+            (overdue_label, str(overdue_n)),
         ]
 
     def _show_stats(rows_raw: list, *, returned: bool = False) -> None:
@@ -2612,10 +2795,10 @@ elif page == "Reports":
                 unsafe_allow_html=True,
             )
         with r3:
-            overdue_n = int(summary["Over 5 days"])
+            overdue_n = int(summary[overdue_label])
             st.markdown(
                 stat_card(
-                    "Over 5 days",
+                    overdue_label,
                     str(overdue_n),
                     "orange" if overdue_n else "green",
                     "⚠",
@@ -3075,6 +3258,167 @@ elif page == "Reports":
                     key="pdf_returned",
                     returned=True,
                 )
+
+elif page == "Usage":
+    if not is_admin():
+        st.warning("Usage reports are for Manager and Admin logins.")
+        st.stop()
+
+    st.markdown("##### Usage")
+    st.caption(
+        "Most-used tools, tools never or rarely checked out, and checkouts per technician."
+    )
+    if "usage_start" not in st.session_state:
+        st.session_state.usage_start = date.today() - timedelta(days=90)
+    if "usage_end" not in st.session_state:
+        st.session_state.usage_end = date.today()
+    if "usage_rare_max" not in st.session_state:
+        st.session_state.usage_rare_max = 1
+
+    d1, d2, d3 = st.columns([1.2, 1.2, 1.4])
+    with d1:
+        usage_start = st.date_input("From", key="usage_start")
+    with d2:
+        usage_end = st.date_input("Through", key="usage_end")
+    with d3:
+        rare_max = st.selectbox(
+            "Rarely means at most",
+            options=[1, 2, 3],
+            format_func=lambda count: f"{count} checkout" if count == 1 else f"{count} checkouts",
+            key="usage_rare_max",
+        )
+    include_non_current = st.checkbox(
+        "Include non-current tools in never / rarely",
+        key="usage_include_non_current",
+    )
+    report = build_usage_report(
+        data,
+        start=usage_start,
+        end=usage_end,
+        rare_at_most=int(rare_max),
+        include_non_current=include_non_current,
+        technician_names=_tech_names(),
+    )
+    note_kind = "warn" if report.get("history_capped") else "info"
+    st.markdown(status_banner(usage_history_note(report), note_kind), unsafe_allow_html=True)
+    if not report.get("ok"):
+        st.error(report.get("error") or "Could not build the usage report.")
+    else:
+        m1, m2, m3, m4 = st.columns(4)
+        with m1:
+            st.markdown(
+                stat_card("Checkouts", str(report["event_count"]), "amber", "📤"),
+                unsafe_allow_html=True,
+            )
+        with m2:
+            st.markdown(
+                stat_card("Tools used", str(len(report["most_used"])), "green", "🔧"),
+                unsafe_allow_html=True,
+            )
+        with m3:
+            st.markdown(
+                stat_card("Never in range", str(len(report["never"])), "stone", "—"),
+                unsafe_allow_html=True,
+            )
+        with m4:
+            st.markdown(
+                stat_card("Rarely", str(len(report["rarely"])), "orange", "·"),
+                unsafe_allow_html=True,
+            )
+
+        section = st.radio(
+            "Show",
+            ["Most used", "Never or rarely", "By technician"],
+            horizontal=True,
+            key="usage_section",
+        )
+        if section == "Most used":
+            st.caption("Each check-out counts once, including tools that are still signed out.")
+            if not report["most_used"]:
+                st.info("No checkouts in this date range.")
+            else:
+                st.dataframe(
+                    pd.DataFrame(
+                        [
+                            {
+                                "Tool #": row["tool_no"],
+                                "Description": row["description"],
+                                "Checkouts": row["checkouts"],
+                                "Qty": row["qty"],
+                                "Technicians": row["technicians"],
+                                "Last checkout": _fmt_when(row["last_checked_out_at"]),
+                            }
+                            for row in report["most_used"]
+                        ]
+                    ),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+        elif section == "Never or rarely":
+            st.caption(
+                "Never means no check-out in this date range. "
+                "A tool can land here when its older loans have dropped off the 500-entry history."
+            )
+            st.markdown(f"##### Never checked out ({len(report['never'])})")
+            if report["never"]:
+                st.dataframe(
+                    pd.DataFrame(
+                        [
+                            {
+                                "Tool #": row["tool_no"],
+                                "Description": row["description"],
+                                "Location": row["location"] or "(none)",
+                                "Status": row["status"],
+                                "Checkouts": row["checkouts"],
+                            }
+                            for row in report["never"]
+                        ]
+                    ),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+            else:
+                st.info("Every tool in this filter was checked out at least once in the range.")
+            st.markdown(
+                f"##### Rarely checked out ({len(report['rarely'])}) — "
+                f"{report['rare_at_most']} or fewer"
+            )
+            if report["rarely"]:
+                st.dataframe(
+                    pd.DataFrame(
+                        [
+                            {
+                                "Tool #": row["tool_no"],
+                                "Description": row["description"],
+                                "Location": row["location"] or "(none)",
+                                "Status": row["status"],
+                                "Checkouts": row["checkouts"],
+                            }
+                            for row in report["rarely"]
+                        ]
+                    ),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+            else:
+                st.info("No tools in the rare band for this range.")
+        else:
+            st.caption("Technicians with no checkouts in the range are listed at zero.")
+            st.dataframe(
+                pd.DataFrame(
+                    [
+                        {
+                            "Technician": row["tech_name"],
+                            "Checkouts": row["checkouts"],
+                            "Qty": row["qty"],
+                            "Distinct tools": row["distinct_tools"],
+                        }
+                        for row in report["by_technician"]
+                    ]
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
 
 elif page == "History":
     st.markdown("##### History")

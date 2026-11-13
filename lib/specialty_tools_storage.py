@@ -22,7 +22,12 @@ LIVE_PATH = DATA_DIR / "specialty_tools.json"
 SEED_PATH = DATA_DIR / "specialty_tools_seed.json"
 
 HISTORY_LIMIT = 500
-OVERDUE_AFTER_DAYS = 5
+# Default shop rule: flag a checkout once it has been out this many days.
+# Admins can store a different value on the inventory blob under settings.
+DEFAULT_OVERDUE_AFTER_DAYS = 5
+OVERDUE_AFTER_DAYS = DEFAULT_OVERDUE_AFTER_DAYS
+MIN_OVERDUE_AFTER_DAYS = 1
+MAX_OVERDUE_AFTER_DAYS = 90
 
 # Remote jsonb store read outcomes. "error" must never trigger a seed overwrite.
 REMOTE_OK = "ok"
@@ -370,27 +375,117 @@ def is_overdue_alert_dismissed(
     return current < until
 
 
+def _coerce_overdue_days(value: Any) -> Optional[int]:
+    """Return a threshold in range, or None when the value is unset or invalid."""
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, float):
+        if not value.is_integer():
+            return None
+        value = int(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text or not text.isdigit():
+            return None
+        value = int(text)
+    try:
+        days = int(value)
+    except (TypeError, ValueError):
+        return None
+    if days < MIN_OVERDUE_AFTER_DAYS or days > MAX_OVERDUE_AFTER_DAYS:
+        return None
+    return days
+
+
+def _settings_for_store(raw: Any) -> Dict[str, Any]:
+    """Keep settings inside the existing inventory jsonb.
+
+    Primitive keys are preserved so a later settings field is not wiped on save.
+    ``overdue_after_days`` is stored only when it is a whole number in range.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    kept: Dict[str, Any] = {}
+    for key, value in raw.items():
+        name = str(key)
+        if name == "overdue_after_days":
+            parsed = _coerce_overdue_days(value)
+            if parsed is not None:
+                kept[name] = parsed
+            continue
+        if isinstance(value, bool) or value is None or isinstance(value, (str, int, float)):
+            if isinstance(value, float) and value != value:
+                continue
+            kept[name] = value
+    return kept
+
+
+def overdue_after_days(data: Dict[str, Any] | None) -> int:
+    """Days before an open checkout is overdue. Falls back to the shop default."""
+    if not isinstance(data, dict):
+        return DEFAULT_OVERDUE_AFTER_DAYS
+    settings = data.get("settings")
+    if not isinstance(settings, dict):
+        return DEFAULT_OVERDUE_AFTER_DAYS
+    parsed = _coerce_overdue_days(settings.get("overdue_after_days"))
+    if parsed is None:
+        return DEFAULT_OVERDUE_AFTER_DAYS
+    return parsed
+
+
+def set_overdue_after_days(data: Dict[str, Any], days: Any) -> Tuple[bool, str]:
+    """Store the overdue threshold on the inventory record. Does not write history."""
+    if not isinstance(data, dict):
+        return False, "Inventory is not loaded."
+    parsed = _coerce_overdue_days(days)
+    if parsed is None:
+        return (
+            False,
+            f"Enter a whole number of days from {MIN_OVERDUE_AFTER_DAYS} "
+            f"to {MAX_OVERDUE_AFTER_DAYS}.",
+        )
+    settings = data.get("settings")
+    if not isinstance(settings, dict):
+        settings = {}
+    else:
+        settings = dict(settings)
+    settings["overdue_after_days"] = parsed
+    data["settings"] = settings
+    return True, f"Tools out {parsed} days or more are flagged as overdue."
+
+
 def list_overdue_checkouts(
     data: Dict[str, Any],
     *,
-    days: int = OVERDUE_AFTER_DAYS,
+    days: Optional[int] = None,
     today: Optional[date] = None,
+    include_dismissed: bool = False,
 ) -> List[Dict[str, Any]]:
-    """Active checkouts out for `days` or more that are not snoozed."""
+    """Active checkouts out for `days` or more.
+
+    ``days`` defaults to the saved threshold (or 5). Snoozed alerts are omitted
+    unless ``include_dismissed`` is set; those rows are marked ``alert_snoozed``.
+    """
     ensure_checkout_ids(data)
+    threshold = overdue_after_days(data) if days is None else int(days)
     overdue: List[Dict[str, Any]] = []
     for checkout in data.get("active_checkouts") or []:
         if not isinstance(checkout, dict):
             continue
         out_days = days_checked_out(checkout)
-        if out_days < days:
+        if out_days < threshold:
             continue
-        if is_overdue_alert_dismissed(checkout, today=today):
+        dismissed = is_overdue_alert_dismissed(checkout, today=today)
+        if dismissed and not include_dismissed:
             continue
         item = dict(checkout)
         item["days_out"] = out_days
+        item["alert_snoozed"] = dismissed
         overdue.append(item)
-    overdue.sort(key=lambda c: int(c.get("days_out") or 0), reverse=True)
+    overdue.sort(
+        key=lambda c: (int(c.get("days_out") or 0), str(c.get("checked_out_at") or "")),
+        reverse=True,
+    )
     return overdue
 
 
@@ -437,6 +532,9 @@ def _normalize(data: Dict[str, Any] | None) -> Dict[str, Any]:
     base["tools"] = list(tools) if isinstance(tools, list) else []
     base["active_checkouts"] = list(checkouts) if isinstance(checkouts, list) else []
     base["history"] = list(history) if isinstance(history, list) else []
+    settings = _settings_for_store(data.get("settings") if isinstance(data, dict) else None)
+    if settings:
+        base["settings"] = settings
     ensure_checkout_ids(base)
     return base
 
@@ -1223,6 +1321,8 @@ def replace_tools_from_import(
     new_data = empty_inventory(source)
     new_data["tools"] = merged_tools
     new_data["history"] = list(data.get("history") or [])
+    if isinstance(data.get("settings"), dict):
+        new_data["settings"] = copy.deepcopy(data["settings"])
 
     if keep_checkouts:
         by_no = {
@@ -1372,65 +1472,31 @@ def search_tools(
     only_without_location: bool = False,
     only_unaccounted: bool = False,
     only_part_ordered: bool = False,
+    brand: str = "",
+    brand_level: str = "",
 ) -> List[Dict[str, Any]]:
-    q = str(query or "").strip().lower()
-    loc_filter = str(location or "").strip().lower()
-    out_ids = {
-        c.get("tool_id")
-        for c in data.get("active_checkouts") or []
-        if isinstance(c, dict)
-    }
-    results = []
-    for tool in data.get("tools") or []:
-        if status != "all" and tool.get("status") != status:
-            continue
-        if only_out and tool.get("id") not in out_ids:
-            continue
-        acct = normalize_accountability(tool.get("accountability"))
-        tool_loc = str(tool.get("location") or "").strip()
-        if only_part_ordered:
-            if acct != ACCOUNTABILITY_PART_ORDERED:
-                continue
-        elif only_unaccounted:
-            if acct != ACCOUNTABILITY_UNACCOUNTED:
-                continue
-        else:
-            if only_with_location and (not tool_loc or acct in ACCOUNTABILITY_BOXES):
-                continue
-            if only_without_location and (tool_loc or acct in ACCOUNTABILITY_BOXES):
-                continue
-        if loc_filter and loc_filter not in tool_loc.lower():
-            continue
-        if q:
-            hay = " ".join(
-                [
-                    str(tool.get("tool_no") or ""),
-                    str(tool.get("description") or ""),
-                    str(tool.get("location") or ""),
-                    str(tool.get("notes") or ""),
-                    acct,
-                ]
-            ).lower()
-            if q not in hay:
-                continue
-        enriched = dict(tool)
-        enriched["qty_out"] = qty_out(data, tool["id"])
-        enriched["qty_available"] = qty_available(data, tool)
-        enriched["accountability"] = acct
-        results.append(enriched)
-    results.sort(key=lambda t: str(t.get("sort_order") or t.get("tool_no") or ""))
-    return results
+    """Filter the catalog. Uses a cached index of the tool fields and open qty."""
+    from lib.tool_search import search_indexed_tools
+
+    return search_indexed_tools(
+        data,
+        query,
+        status=status,
+        location=location,
+        only_out=only_out,
+        only_with_location=only_with_location,
+        only_without_location=only_without_location,
+        only_unaccounted=only_unaccounted,
+        only_part_ordered=only_part_ordered,
+        brand=brand,
+        brand_level=brand_level,
+    )
 
 
 def unique_locations(data: Dict[str, Any]) -> List[str]:
-    return sorted(
-        {
-            str(t.get("location") or "").strip()
-            for t in data.get("tools") or []
-            if str(t.get("location") or "").strip()
-        },
-        key=str.lower,
-    )
+    from lib.tool_search import indexed_locations
+
+    return indexed_locations(data)
 
 
 INVENTORY_RESULT_LOCATED = "located"
